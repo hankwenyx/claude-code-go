@@ -26,83 +26,117 @@
 
 ---
 
-## 工具的完整接口
+## 工具的完整接口（`src/Tool.ts`）
 
-每个工具都实现同一套接口（`src/Tool.ts`）：
+每个工具都实现同一套接口，完整字段分类如下：
 
+**必须实现：**
+```typescript
+name              工具名（模型调用时用）
+inputSchema       参数格式定义（Zod schema）
+call()            执行逻辑（返回 { data: Out }）
 ```
-必须实现：
-  name              工具名（模型调用时用）
-  inputSchema       参数格式定义（Zod）
-  call()            执行逻辑
 
-可选实现：
-  validateInput()   参数语义验证（Zod 之后的额外检查）
-  checkPermissions()权限决策（allow / deny / ask 用户）
-  isReadOnly()      是否只读（影响并发执行策略）
-  isConcurrencySafe()是否可与其他工具并发
+**标识与元数据：**
+```typescript
+description()     工具描述（发给模型，影响模型何时调用）
+prompt()          工具的系统提示词（注入到 getSystemPrompt）
+searchHint        全文搜索提示（工具发现时使用）
+isMcp             是否为 MCP 工具
+alwaysLoad        始终加载（不受 ToolSearch 过滤）
+mcpInfo           MCP 服务器信息（serverName + toolName）
+```
 
-UI 相关：
-  renderToolUseMessage()    工具被调用时的 UI（streaming 期间实时渲染）
-  renderToolResultMessage() 工具完成后的 UI
-  getActivityDescription()  spinner 文字（如 "Reading src/foo.ts"）
-  userFacingName()          左侧工具标签显示名
+**行为控制：**
+```typescript
+isReadOnly()           只读工具（影响并发调度，默认 false）
+isConcurrencySafe()    可与其他工具并发（只读工具返回 true）
+isDestructive()        破坏性操作（影响 UI 警告）
+isOpenWorld()          可能访问外部网络/系统
+strict                 Zod strict 模式（额外未知字段校验）
+interruptBehavior()    用户中断时的行为（'cancel' | 'wait'）
+```
+
+**验证：**
+```typescript
+validateInput()    Zod 之后的语义检查（如"文件未读就不能编辑"）
+checkPermissions() 权限决策（返回 allow/deny/ask/passthrough）
+requiresUserInteraction() 强制弹出 UI（绕过 bypass 模式）
+```
+
+**结果处理：**
+```typescript
+maxResultSizeChars    结果截断阈值（与 DEFAULT_MAX_RESULT_SIZE_CHARS=50_000 取 min）
+mapToolResultToToolResultBlockParam()  结果转为 API 格式
+extractSearchText()   从结果中提取可搜索文本
+```
+
+**UI 渲染（8 个方法）：**
+```typescript
+renderToolUseMessage()          工具被调用时（streaming 实时渲染）
+renderToolUseProgressMessage()  执行中的进度 UI
+renderToolUseQueuedMessage()    排队等待时的 UI
+renderToolResultMessage()       完成后的结果 UI
+getActivityDescription()        spinner 文字（如 "Reading src/foo.ts"）
+userFacingName()                左侧工具标签显示名（返回 '' 则隐藏）
+description()                   工具描述文本
+getToolGroup()                  UI 分组
 ```
 
 ---
 
-## 工具的完整执行流程
+## 工具的完整执行流程（`src/services/tools/toolExecution.ts`）
 
 ```
 模型调用工具
       │
       ▼
 ① Zod schema 验证输入参数
-      │ 失败 → 返回 InputValidationError 给模型（不终止循环）
+      │ 失败 → 返回 InputValidationError 给模型（is_error: true，不终止循环）
       ▼
 ② tool.validateInput()（语义检查，如"文件未读就不能编辑"）
-      │ 失败 → 返回错误给模型
+      │ 失败 → 返回 errorCode + 说明给模型
       ▼
-③ 执行 PreToolUse Hooks（用户自定义钩子，可修改输入/阻止执行）
-      │
+③ 执行 PreToolUse Hooks（runPreToolUseHooks）
+      │ hook 可以：修改 input、阻止执行（block_decision）、追加 context
+      │ resolveHookPermissionDecision() 汇总 hook 结论
       ▼
-④ 权限检查 canUseTool()
-      │ deny  → 返回"用户拒绝"给模型
-      │ ask   → 弹出权限对话框，等待用户确认
+④ 权限检查 hasPermissionsToUseTool()
+      │ deny  → 返回"用户拒绝"给模型（is_error: true）
+      │ ask   → 弹出权限对话框（等待用户 allow/deny）
+      │        ask + 分类器 → classifyYoloAction()（auto 模式）
       │ allow → 继续
       ▼
 ⑤ tool.call()（实际执行）
-      │ 异常 → 捕获，包装为 is_error tool_result 返回给模型
+      │ AbortError → is_error + isInterrupt: true
+      │ 其他异常 → classifyToolError() 分类错误类型
       ▼
-⑥ 执行 PostToolUse Hooks
-      │
+⑥ maybePersistLargeToolResult()
+      │ 结果 > min(tool.maxResultSizeChars, 50_000) → 持久化到磁盘
+      │ 返回 <persisted-output> 格式给模型
       ▼
-⑦ 结果返回给模型（作为下一轮的 user 消息）
+⑦ 执行 PostToolUse Hooks（runPostToolUseHooks）
+      │ hook 可以：修改输出、注入追加消息
+      │ PostToolUseFailure hook 在 call() 抛出时触发
+      ▼
+⑧ 结果返回给模型（作为下一轮的 user 消息）
 ```
 
 **关键设计**：工具执行失败不会终止 Agent Loop，错误作为工具结果返回给模型，让模型自己决定怎么处理。
 
 ---
 
-## 并发执行策略
+## 并发执行策略（`StreamingToolExecutor`）
 
-不是所有工具都能同时执行，规则是这样的：
-
-```
-只读工具（isReadOnly=true）：
-  Read / Grep / Glob / WebFetch
-  → 可以互相并发执行，最多同时 10 个
-
-写操作工具（isReadOnly=false）：
-  Bash / FileEdit / FileWrite
-  → 必须串行，等前一个完成才执行下一个
-
-特殊情况：
-  Bash 执行出错 → 自动取消同批次的其他工具
-  （因为后续 Bash 命令可能依赖前面的结果）
-```
+`isConcurrencySafe(parsedInput)` 决定是否可以并发：
 
 ```
+可以执行 = （没有任何工具在 executing）
+          OR（新工具是 isConcurrencySafe 且所有 executing 工具也是 isConcurrencySafe）
+
+只读工具（Read/Grep/Glob/WebFetch） → isConcurrencySafe = true
+写操作工具（Bash/Edit/Write）      → isConcurrencySafe = false（串行）
+
 示例：模型一次调用了 5 个工具
   Read("a.ts")  ← 只读 ┐
   Read("b.ts")  ← 只读 ├─ 三个并发执行
@@ -111,218 +145,307 @@ UI 相关：
   Bash("test")  ← 写操作 → 等 Edit 完成后执行
 ```
 
+`getCompletedResults()` 按工具入队顺序遍历：遇到未完成的非 `isConcurrencySafe` 工具时 **break**（串行工具充当屏障，保证结果顺序）。
+
+**BashTool 出错时的级联**：`hasErrored = true`，`siblingAbortController.abort('sibling_error')`，后续工具生成合成 `tool_use_error`：`Cancelled: parallel tool call ${desc} errored`。
+
 ---
 
 ## 核心工具详解
 
 ### Bash — 执行 Shell 命令
 
-最强大也最危险的工具，做了很多安全处理：
-
 **命令分类**（影响 UI 折叠显示）
 
-```
-搜索命令  → find / grep / rg / ag          显示为可折叠的搜索结果
-读取命令  → cat / head / tail / wc          显示为可折叠的读取结果
-列表命令  → ls / tree / du                  显示为可折叠的列表结果
-静默命令  → mv / cp / rm / mkdir            成功时显示 "Done"（无输出）
-其他命令  → 完整显示输出
-```
-
-**长时间命令的处理**
-
-```
-执行时间 > 2s    → 开始显示实时进度（避免用户以为卡死了）
-用户按 Ctrl+B    → 转为后台运行（可用 TaskOutput 查看输出）
-run_in_background=true → 模型主动要求后台运行
-执行时间 > 2min  → 自动后台化（助手模式下）
+```typescript
+// 常量定义（BashTool.tsx lines 59-72）
+BASH_SEARCH_COMMANDS = new Set(['find', 'grep', 'rg', 'ag', 'ack', 'locate', 'which', 'whereis'])
+BASH_READ_COMMANDS   = new Set(['cat', 'head', 'tail', 'less', 'more', 'wc', 'stat', 'file', 'strings', 'jq', 'awk', 'cut', 'sort', 'uniq', 'tr'])
+BASH_LIST_COMMANDS   = new Set(['ls', 'tree', 'du'])
+BASH_SILENT_COMMANDS = ['mv', 'cp', 'rm', 'mkdir', 'touch', 'ln', ...]  // 静默命令
 ```
 
 **大输出处理**
 
 ```
-输出 > 30,000 字符
+输出文件 > maxResultSizeChars（30,000 字符）
   │
-  ├─ 持久化到磁盘文件
+  ├─ 复制到 tool-results 目录（link 优先，fallback copyFile）
+  │   如 > 64 MB → fsTruncate 截断到 64 MB
   └─ 返回给模型：
      <persisted-output>
-     输出太大（X bytes），已保存到：/path/to/file
-     预览（前 2KB）：
+     Output too large (X bytes). Full output saved to: /path/to/file
+     Preview (first 2KB):
      [内容前 2000 字节...]
      </persisted-output>
+
+PREVIEW_SIZE_BYTES = 2000（toolResultStorage.ts line 109）
+MAX_PERSISTED_SIZE = 64 * 1024 * 1024（BashTool.tsx line 732）
+```
+
+**进度显示与自动后台化**
+
+```typescript
+// 进度阈值
+PROGRESS_THRESHOLD_MS = 2000          // 2s 后开始显示实时进度
+// 超时后台阈值（KAIROS 助手模式）
+ASSISTANT_BLOCKING_BUDGET_MS = 15_000 // 15s 后自动后台化
+
+// KAIROS 自动后台化逻辑（BashTool.tsx line 976-983）
+if (feature('KAIROS') && getKairosActive() && isMainThread && !isBackgroundTasksDisabled && run_in_background !== true) {
+  setTimeout(() => {
+    if (shellCommand.status === 'running' && backgroundShellId === undefined) {
+      assistantAutoBackgrounded = true
+      startBackgrounding('tengu_bash_command_assistant_auto_backgrounded')
+    }
+  }, ASSISTANT_BLOCKING_BUDGET_MS).unref()  // .unref() 防止 timer 阻止进程退出
+}
 ```
 
 **sed 命令特殊处理**
 
-当模型发出 `sed -i 's/old/new/' file` 这样的命令时，Claude Code 会：
-1. 解析 sed 语法（BRE → JS 正则转换）
-2. 在权限对话框里**展示实际的文件变更预览**（不是原始命令）
-3. 用户确认后，直接用解析结果写入（跳过 shell 执行），确保"你看到的就是写进去的"
+当模型发出 `sed -i 's/old/new/' file` 这样的命令时：
+1. `parseSedCommandForSimulation()` 解析 sed BRE 语法 → JS 正则（用 NULL_BYTE 占位符保护转义字符）
+2. 在权限对话框里**展示实际文件变更预览**（不是原始命令字符串）
+3. 用户确认后，`input._simulatedSedEdit` 为 true，直接调用 `applySedEdit()` 写入（跳过 shell），确保"你看到的就是写进去的"
 
-**沙箱模式**
-
-开启沙箱后，Bash 命令在受限环境中执行（限制文件系统访问和网络）。部分命令可以配置豁免沙箱。
+**沙箱阻断**：开启沙箱后，Bash 在 bubblewrap 受限环境中执行；部分命令可配置 `excludedCommands` 豁免。
 
 ---
 
 ### FileRead — 读取文件
 
-支持多种文件类型，不只是纯文本：
+**支持文件类型**
 
 ```
 .py / .ts / .go 等  → 带行号的文本内容
 .png / .jpg 等      → base64 图片（发给模型视觉能力）
-.pdf               → 有 pages 参数 → 提取指定页转 JPEG
-                     无 pages 参数 → 原生 PDF 内容
+.pdf               → 有 pages 参数 → 提取指定页转 JPEG；无 → 原生 PDF
 .ipynb             → Jupyter notebook（cells 数组格式）
 ```
 
-**智能去重**：如果同一个文件读过一次且没有修改，再次 Read 时返回"文件没有变化"而不是重新发送内容（节省 token）。
+**智能去重（6 条件）**
 
-**Token 限制**：先粗估（字符数换算），超过阈值的 1/4 才精确计数。超出上限时提示用模型用 offset/limit 分段读取。
+当所有条件同时满足时，返回 `file_unchanged` 存根（不重传内容）：
 
-**安全检查**：阻止读取 `/dev/zero`、`/dev/random` 等无限输出设备；读取文本文件后追加安全提醒（防止文件内容注入恶意指令）。
+```
+1. GrowthBook tengu_read_dedup_killswitch 未开启
+2. readFileState 中存在此文件的记录（existingState）
+3. !existingState.isPartialView（之前是完整读取）
+4. existingState.offset !== undefined（是 Read 写入的，非 Edit/Write）
+5. 参数一致：offset 和 limit 相同
+6. 文件 mtime 未变化（getFileModificationTimeAsync() === existingState.timestamp）
+```
+
+**两级 Token 限制**
+
+```
+maxSizeBytes: MAX_OUTPUT_SIZE = 256 KB        → 读取原始字节上限
+maxTokens: DEFAULT_MAX_OUTPUT_TOKENS = 25000  → Token 估算上限
+  （可被环境变量 CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS 或 GrowthBook tengu_amber_wren 覆盖）
+
+maxResultSizeChars: Infinity  → 不触发 maybePersistLargeToolResult，自身有 token 机制
+```
+
+**安全检查**：阻止读取 `/dev/zero`、`/dev/random` 等无限输出设备；文本文件内容后追加防注入提醒。
 
 ---
 
 ### FileEdit — 精确编辑文件
 
-这是最精密的工具，有严格的"先读后写"保护：
+**10 种 errorCode 分类**
 
-```
-模型调用 Edit(file, old_string, new_string)
-        │
-① 检查这个文件是否读取过（未读就编辑 → 报错）
-        │
-② 检查文件的修改时间（读取后文件被改过 → 报错，防止覆盖他人修改）
-        │
-③ 在文件中找到 old_string
-   ├─ 找不到 → 尝试"引号归一化"再找（处理智能引号/直引号混用）
-   ├─ 找到多处 + replace_all=false → 报错（避免意外替换）
-   └─ 找到一处 → 继续
-        │
-④ 原子写入（同步操作，不 await，防止并发写入）
-        │
-⑤ 通知 LSP（TypeScript 等语言服务器更新诊断）
-⑥ 通知 VSCode（更新 diff 视图）
-⑦ 更新文件状态缓存（记录新的修改时间）
+| errorCode | 触发条件 |
+|-----------|---------|
+| `0` | TeamMem 密钥保护拒绝编辑 |
+| `1` | `old_string === new_string`（无变化） |
+| `2` | 文件路径匹配 `alwaysDeny` 规则 |
+| `3` | `old_string === ''` 但文件已存在（创建冲突） |
+| `4` | 文件不存在且 `old_string !== ''` |
+| `5` | 文件是 Jupyter Notebook（应用 NotebookEdit） |
+| `6` | 文件未读过（`!readTimestamp || readTimestamp.isPartialView`） |
+| `7` | 文件自上次读取后被修改（mtime 检查失败） |
+| `8` | `old_string` 在文件中找不到 |
+| `9` | 找到多处匹配但 `replace_all` 为 `false` |
+| `10` | 文件超过 `MAX_EDIT_FILE_SIZE`（1 GiB） |
+
+**mtime 双重检查（防 Windows 假阳性）**
+
+```typescript
+const lastWriteTime = getFileModificationTime(fullFilePath)
+if (lastWriteTime > readTimestamp.timestamp) {
+  // Windows 文件系统时间戳可能在内容不变时也改变
+  // 完整读取时对比内容作为 fallback
+  const isFullRead = readTimestamp.offset === undefined && readTimestamp.limit === undefined
+  if (isFullRead && fileContent === readTimestamp.content) {
+    // 内容相同，安全继续
+  } else {
+    return { result: false, errorCode: 7 }  // 真正的外部修改
+  }
+}
 ```
 
-返回给模型的是简洁的确认消息（"文件已更新"），不是 diff 内容。UI 里展示 diff 供用户查看。
+**原子写入序列**
+
+1. 检测文件编码（`detectFileEncoding`）
+2. 检测行尾符（`detectLineEndings`，保持原始 CRLF/LF）
+3. 构建新内容字符串
+4. `writeTextContent()` 同步写入磁盘（不 await，防并发写入竞态）
+5. 通知 LSP（TypeScript 语言服务更新诊断）
+6. 通知 VSCode（更新 diff 视图）
+7. 更新 `readFileState.set()`（记录新 mtime + 新内容）
+
+`maxResultSizeChars: 100_000`（编辑确认消息本身很短，但防御性设置）
 
 ---
 
 ### Grep — 内容搜索
 
-封装了 ripgrep，有三种输出模式：
+封装 ripgrep，三种输出模式：
 
 ```
-files_with_matches（默认）
-  → 返回包含匹配的文件路径列表
-  → 按修改时间排序（最近修改的排前面）
-  → 默认最多 250 条
-
-content
-  → 展示匹配行的内容（支持 -A/-B/-C 上下文行）
-  → 支持 -n 显示行号，-i 不区分大小写，-U 多行匹配
-
-count
-  → 每个文件的匹配数量统计
+files_with_matches（默认）→ 路径列表，按 mtime 排序，最多 250 条
+content              → 匹配行内容（支持 -A/-B/-C/-n/-i/-U 参数）
+count                → 每文件匹配数统计
 ```
 
-自动排除 `.git`、`.svn` 等版本控制目录，限制每行最长 500 字符（避免 base64/minified 内容污染搜索结果）。
+自动排除 `.git`、`.svn` 等版本控制目录；每行最长 500 字符（避免 base64/minified 内容污染）。
 
 ---
 
 ### WebFetch — 抓取网页内容
 
-不是简单地返回 HTML，而是进行了"理解"处理：
+**关键常量**
 
+```typescript
+MAX_URL_LENGTH   = 2000           // URL 长度上限（WebFetchTool utils.ts line 106）
+CACHE_TTL_MS     = 15 * 60 * 1000 // 15 分钟 URL 缓存
+MAX_CACHE_SIZE_BYTES = 50 * 1024 * 1024  // 50 MB LRU 缓存总量
+MAX_MARKDOWN_LENGTH = 100_000     // Haiku 摘要的触发阈值
+maxResultSizeChars = 100_000      // 结果截断阈值
 ```
-请求 URL
-  │
-  ├─ 检查域名是否在白名单 → 自动允许
-  ├─ 不在白名单 → 弹权限对话框
-  │
-  ▼
-获取 HTML，转换为 Markdown
-  │
-  ├─ 跨域重定向？→ 返回特殊响应，让模型重新调用新 URL
-  │              （不自动跟随，避免授权了 A 域名结果跳到 B 域名）
-  │
-  ├─ 内容较小 → 直接返回 Markdown 文本
-  └─ 内容很大 → 用 Haiku 模型对内容回答你的 prompt，只返回相关部分
-                （"用小模型帮你摘要"）
+
+**Haiku 摘要触发逻辑**
+
+```typescript
+// 跳过 Haiku（直接返回原始内容）当三个条件全部满足：
+if (
+  isPreapproved &&                          // 域名在预授权白名单
+  contentType.includes('text/markdown') &&  // Content-Type 是 text/markdown
+  content.length < MAX_MARKDOWN_LENGTH      // 内容 < 100,000 字符
+) {
+  result = content  // 直接返回
+}
+// 否则调用 Haiku 模型对内容回答 prompt（摘要/提取相关部分）
 ```
+
+**跨域重定向处理**：不自动跟随跨域重定向（防止授权了域名 A 的请求跳到域名 B），返回特殊响应让模型重新调用新 URL。
 
 ---
 
 ### MCPTool — MCP 服务器代理
 
-MCP（Model Context Protocol）工具是动态生成的——运行时根据连接的 MCP 服务器来创建。
+**动态生成机制**（`src/services/mcp/client.ts`）
 
-```
-MCP 服务器连接成功
-  │
-  ▼
-拉取服务器的工具列表
-  │
-  ▼
-为每个工具生成一个 MCPTool 实例：
-  name:     mcp__<serverName>__<toolName>
-  schema:   直接使用服务器提供的 JSON Schema
-  call():   透传调用服务器，处理认证/重试/大输出截断
-  权限:     passthrough → 交由通用权限系统处理
+MCP 工具通过对象展开（spread）模式从 `MCPTool` 基础模板生成：
+
+```typescript
+return toolsToProcess.map((tool): Tool => {
+  const fullyQualifiedName = buildMcpToolName(client.name, tool.name)
+  return {
+    ...MCPTool,                           // 展开基础模板（默认行为）
+    name: skipPrefix ? tool.name : fullyQualifiedName,  // mcp__server__tool 格式
+    mcpInfo: { serverName: client.name, toolName: tool.name },
+    isMcp: true,
+    alwaysLoad: tool._meta?.['anthropic/alwaysLoad'] === true,
+    async description() { return tool.description ?? '' },
+    // MCP annotations → Tool 接口字段
+    isConcurrencySafe() { return tool.annotations?.readOnlyHint ?? false },
+    isReadOnly()        { return tool.annotations?.readOnlyHint ?? false },
+    isDestructive()     { return tool.annotations?.destructiveHint ?? false },
+    isOpenWorld()       { return tool.annotations?.openWorldHint ?? false },
+  }
+})
 ```
 
-MCP 工具的 `checkPermissions()` 返回 `passthrough`，意味着"让通用权限规则来决定"。用户可以配置 `mcp__server__tool` 格式的允许/拒绝规则。
+`checkPermissions()` 返回 `passthrough`，由通用权限系统处理（用户可配置 `mcp__server__tool` 格式规则）。
+
+`fetchToolsForClient()` 使用 LRU memoize 缓存，避免重复拉取 `tools/list`。
 
 ---
 
 ### AgentTool — 启动子 Agent
 
-这是 Claude Code 的"元工具"——用工具来启动另一个 AI Agent。
+**路由决策树**
 
 ```
-AgentTool 调用
+AgentTool.call()
   │
-  ├─ 同步模式（等待结果）→ runAgent() → 独立查询循环 → 返回最终结果
+  ├─ teamName && name → spawnTeammate()（team 模式，返回 status: 'teammate_spawned'）
   │
-  ├─ 异步模式（后台运行）→ registerAsyncAgent() → 立刻返回 task_id
-  │                        后续用 TaskOutput 查看输出
+  ├─ isForkSubagentEnabled() && 无 subagent_type
+  │    → FORK_AGENT 定义 + 从父上下文构建 fork messages（缓存共享路径）
   │
-  ├─ worktree 隔离 →  创建独立 git worktree → 在里面运行
-  │                   Agent 完成后检查变更，可选清理
+  ├─ effectiveIsolation === 'worktree' → 创建 git worktree → runAgent()
   │
-  └─ 远程执行 →  在 Anthropic 云端 CCR 环境运行
-                 本地轮询远端状态
+  ├─ effectiveIsolation === 'remote'（ant-only）→ teleportToRemote() + 本地轮询
+  │
+  ├─ shouldRunAsync = true → registerAsyncAgent()（后台，立刻返回 task_id）
+  │
+  └─ 同步模式 → runAgent()（前台，阻塞直到完成，返回 status: 'completed'）
 ```
 
-子 Agent 有自己独立的：消息历史、AbortController、读写文件状态缓存。
-但共享父 Agent 的：工具列表（受限版本）、MCP 连接、Prompt Cache 前缀。
+**`shouldRunAsync` 的 6 个触发条件**：
 
-**权限继承规则**：父 Agent 已批准的权限**不会自动**传给子 Agent，子 Agent 只拥有显式声明的工具白名单。这防止了权限升级攻击。
+```typescript
+const shouldRunAsync =
+  assistantForceAsync ||         // KAIROS 模式强制异步（kairosActive=true 时）
+  run_in_background === true ||  // 模型显式要求后台
+  isolation === 'worktree' ||    // worktree 隔离（自动后台）
+  (isAnonymousAgent && isAsync) || // 匿名 Agent 且父级异步
+  subagent_type?.includes('background') || // 特定类型强制后台
+  forceAsync                     // 参数强制
+```
+
+```typescript
+// AgentTool.tsx
+const assistantForceAsync = feature('KAIROS') ? appState.kairosEnabled : false
+```
+
+**权限继承规则**：子 Agent 只有显式声明的 `allowedTools` 白名单；父 Agent 运行时已批准的 session 级规则**不会传递**给子 Agent（防止权限升级攻击）。
 
 ---
 
-## 工具结果太大怎么处理？
+## 工具结果持久化（`maybePersistLargeToolResult`）
 
-每个工具都有 `maxResultSizeChars` 限制：
+关键常量（`src/constants/toolLimits.ts`）：
 
-| 工具 | 限制 | 超出后 |
-|------|------|--------|
-| BashTool | 30,000 字符 | 持久化到磁盘，模型收到文件引用 |
-| FileEditTool / WebFetchTool | 100,000 字符 | 同上 |
-| GrepTool | 20,000 字符 | 同上 |
-| FileReadTool | 无限制 | 自身有 token 机制，不走持久化 |
+| 常量 | 值 | 含义 |
+|------|-----|------|
+| `DEFAULT_MAX_RESULT_SIZE_CHARS` | `50_000` | 全局结果上限（工具 `maxResultSizeChars` 取 min）|
+| `MAX_TOOL_RESULTS_PER_MESSAGE_CHARS` | `200_000` | 每条消息所有工具结果的总字符预算 |
+| `MAX_TOOL_RESULT_TOKENS` | `100_000` | Token 限制 |
+| `PREVIEW_SIZE_BYTES` | `2000` | 大结果预览字节数 |
 
-持久化的结果：
+**实际触发阈值**：`Math.min(tool.maxResultSizeChars, DEFAULT_MAX_RESULT_SIZE_CHARS)`
+
+各工具的 `maxResultSizeChars`：
+
+| 工具 | maxResultSizeChars |
+|------|-------------------|
+| BashTool | `30_000` |
+| FileEditTool / WebFetchTool | `100_000`（但受 50_000 全局 cap） |
+| GrepTool | `20_000` |
+| FileReadTool | `Infinity`（不触发持久化，有自身 token 机制）|
+
+**持久化输出格式**（`buildLargeToolResultMessage`）：
+
 ```
 <persisted-output>
-Output too large (X bytes). Full output saved to: /path/to/file
+Output too large (X bytes). Full output saved to: /path/to/tool-results/file
 Preview (first 2KB):
 [内容前 2000 字节...]
-...（截断）
+...
 </persisted-output>
 ```
 
@@ -342,6 +465,10 @@ Preview (first 2KB):
         └─ 按名字排序（保证顺序稳定，不破坏 Prompt Cache）
 
 最后 filterToolsByDenyRules() 按配置的 deny 规则过滤
+
+ToolSearch（feature 可选）：基于当前上下文动态过滤工具列表
+        → alwaysLoad=true 的工具始终包含
+        → 其余工具按相关性过滤（减少 API 工具列表 token 开销）
 ```
 
 ---
@@ -350,15 +477,20 @@ Preview (first 2KB):
 
 | 文件 | 里面有什么 |
 |------|-----------|
-| `src/Tool.ts` | 工具接口定义、ToolUseContext、buildTool 工厂函数 |
-| `src/tools.ts` | 所有工具的注册和组装逻辑 |
-| `src/tools/BashTool/` | Bash 工具（命令分类、沙箱、后台任务、sed 解析） |
-| `src/tools/FileEditTool/` | 文件编辑（冲突检测、原子写入） |
-| `src/tools/FileReadTool/` | 文件读取（多格式、去重、token 限制） |
-| `src/tools/WebFetchTool/` | 网页抓取（Haiku 摘要、重定向检测） |
-| `src/tools/MCPTool/` | MCP 代理工具模板 |
-| `src/services/mcp/client.ts` | MCP 工具动态生成（第 1743 行） |
-| `src/tools/AgentTool/` | 子 Agent 调度 |
-| `src/services/tools/StreamingToolExecutor.ts` | 并发调度核心 |
-| `src/services/tools/toolExecution.ts` | 工具执行链（权限→执行→钩子） |
-| `src/utils/toolResultStorage.ts` | 大结果持久化 |
+| `src/Tool.ts` | 工具接口完整定义（30+ 字段）、ToolUseContext、buildTool 工厂 |
+| `src/tools.ts` | 所有工具注册与组装（getAllBaseTools / assembleToolPool）|
+| `src/constants/toolLimits.ts` | 所有工具结果限制常量 |
+| `src/tools/BashTool/BashTool.tsx` | Bash 工具（命令分类、KAIROS 自动后台、sed 模拟、大输出）|
+| `src/tools/BashTool/runShellCommand.ts` | Shell 执行引擎（进度、后台化）|
+| `src/tools/FileEditTool/FileEditTool.ts` | 文件编辑（10 errorCode、mtime 双检、原子写入）|
+| `src/tools/FileReadTool/FileReadTool.ts` | 文件读取（6 条件去重、多格式、token 限制）|
+| `src/tools/FileReadTool/limits.ts` | FileRead token 限制常量 |
+| `src/tools/WebFetchTool/WebFetchTool.ts` | 网页抓取（Haiku 摘要、重定向检测）|
+| `src/tools/WebFetchTool/utils.ts` | WebFetch 常量（MAX_URL_LENGTH、CACHE_TTL_MS）|
+| `src/services/mcp/client.ts` | MCPTool 动态生成（spread 模式，fetchToolsForClient LRU）|
+| `src/tools/AgentTool/AgentTool.tsx` | 子 Agent 路由（shouldRunAsync 6 条件、assistantForceAsync）|
+| `src/tools/AgentTool/runAgent.ts` | 子 Agent 执行环境初始化（20 步骤）|
+| `src/services/tools/StreamingToolExecutor.ts` | 并发调度核心（TrackedTool、isConcurrencySafe）|
+| `src/services/tools/toolExecution.ts` | 工具执行链（验证→权限→hook→执行→hook，1746 行）|
+| `src/services/tools/toolHooks.ts` | PreToolUse/PostToolUse hook 执行 |
+| `src/utils/toolResultStorage.ts` | 大结果持久化（buildLargeToolResultMessage）|

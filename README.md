@@ -13,6 +13,7 @@ A Go implementation of [Claude Code](https://github.com/anthropics/claude-code).
 - [Tool System](docs/tool-system.md) — 工具系统设计
 - [Task & Multi-Agent](docs/task-and-multi-agent.md) — 任务与多 Agent 协作
 - [Skills & Permissions](docs/skill-and-permissions.md) — 技能与权限系统
+- [Kairos](docs/kairos.md) — AI 助手模式
 
 ## Status
 
