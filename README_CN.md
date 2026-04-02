@@ -2,7 +2,13 @@
 
 [Claude Code](https://github.com/anthropics/claude-code) 的 Go 语言实现。
 
-> **说明**：这是一个非官方的社区实现。
+> **⚠️ 重要声明**
+>
+> 这是一个**仅限研究用途**的项目，基于 Claude Code 源码研究，通过公开发布的 NPM 包与 Source Map 分析还原。
+>
+> 本仓库**不代表** Anthropic 官方内部开发仓库结构。
+>
+> 仅供研究与学习使用，请勿用于商业用途。
 
 [English](README.md) | 中文
 
@@ -381,4 +387,22 @@ make test    # 运行测试
 
 ## License
 
-MIT
+**Research Only / 仅限研究用途**
+
+---
+
+## 声明
+
+- **源码版权**：Claude Code 原始源码版权归 Anthropic 所有
+- **用途**：本仓库仅用于技术研究与学习
+- **禁止商业**：请勿用于商业用途
+- **侵权处理**：如有侵权，请联系删除
+
+---
+
+## Disclaimer
+
+- **Source Code Ownership**: All original Claude Code source code is copyrighted by Anthropic.
+- **Purpose**: This repository is for technical research and learning purposes only.
+- **Commercial Use Prohibited**: Do not use this project for commercial purposes.
+- **Removal Request**: If there is any infringement, please contact us for removal.

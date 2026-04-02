@@ -2,7 +2,13 @@
 
 A Go implementation of [Claude Code](https://github.com/anthropics/claude-code).
 
-> **Note**: This is an unofficial community-driven implementation.
+> **⚠️ Important Notice / 重要声明**
+>
+> This is a **research-only project** based on the study of Claude Code source code, reconstructed through analysis of publicly released NPM packages and Source Maps.
+>
+> This repository does NOT represent the official internal development repository structure of Anthropic.
+>
+> For research and educational purposes only. Not for commercial use.
 
 English | [中文](README_CN.md)
 
@@ -381,4 +387,22 @@ make test    # run tests
 
 ## License
 
-MIT
+**Research Only**
+
+---
+
+## Disclaimer / 声明
+
+### English
+
+- **Source Code Ownership**: All original Claude Code source code is copyrighted by Anthropic.
+- **Purpose**: This repository is for technical research and learning purposes only.
+- **Commercial Use Prohibited**: Do not use this project for commercial purposes.
+- **Removal Request**: If there is any infringement, please contact us for removal.
+
+### 中文
+
+- **源码版权**：Claude Code 原始源码版权归 Anthropic 所有
+- **用途**：本仓库仅用于技术研究与学习
+- **禁止商业**：请勿用于商业用途
+- **侵权处理**：如有侵权，请联系删除
