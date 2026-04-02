@@ -1,0 +1,50 @@
+# Compiled binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+main
+
+# Build output
+/claude
+/cmd/claude/claude
+
+# Go test cache & coverage
+*.test
+*.out
+coverage.html
+coverage.txt
+
+# Go workspace
+go.work
+go.work.sum
+
+# Development notes (local only)
+DEVLOG.md
+plan.md
+CLAUDE.md
+*.local.md
+TEST_REPORT.md
+
+# IDE & editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# Environment / secrets
+.env
+.env.*
+*.credentials.json
+
+# Claude config (local state)
+.claude/
+
+# Origin Source code
+origin_src/
