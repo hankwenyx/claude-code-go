@@ -1,0 +1,54 @@
+run:
+  timeout: 5m
+  tests: true
+
+# 只启用关键的 linter
+linters:
+  disable-all: true
+  enable:
+    - errcheck      # 检查未处理的错误返回值
+    - gofmt         # 格式化检查
+    - goimports     # import 排序
+    - govet         # Go vet 检查
+    - ineffassign   # 检测无效赋值
+    - staticcheck   # 静态分析
+    - typecheck     # 类型检查
+    - unused        # 未使用的代码
+
+issues:
+  # 排除测试文件中的一些规则
+  exclude-rules:
+    # 测试文件中忽略 errcheck for common patterns
+    - path: _test\.go
+      linters:
+        - errcheck
+    # 测试文件中忽略 unused
+    - path: _test\.go
+      linters:
+        - unused
+    # TUI 目录暂时排除（未完成的功能）
+    - path: cmd/claude/tui/
+      linters:
+        - unused
+        - staticcheck
+
+  # 排除已知的废弃方法警告（TUI 相关，暂时保留）
+  exclude:
+    - "SA1019.*deprecated"
+
+  max-issues-per-linter: 50
+  max-same-issues: 10
+
+linters-settings:
+  errcheck:
+    # 检查类型断言
+    check-type-assertions: false
+    # 检查空白赋值
+    check-blank: false
+    # 排除函数
+    exclude-functions:
+      - fmt:*
+      - io/ioutil:ReadFile
+      - os:Remove
+      - os:WriteFile
+      - encoding/json:Unmarshal

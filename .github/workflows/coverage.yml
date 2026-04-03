@@ -1,0 +1,39 @@
+name: Coverage Badge
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Run tests with coverage
+        run: |
+          go test ./... -coverprofile=coverage.out -covermode=atomic
+          go tool cover -func=coverage.out > coverage.txt
+          COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | tr -d '%')
+          echo "COVERAGE=$COVERAGE" >> $GITHUB_ENV
+          echo "Total coverage: $COVERAGE%"
+
+      - name: Generate coverage badge
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: schneegans/dynamic-badges-action@v1.7.0
+        with:
+          auth: ${{ secrets.GIST_TOKEN }}
+          gistID: YOUR_GIST_ID_HERE
+          filename: coverage.json
+          label: coverage
+          message: ${{ env.COVERAGE }}%
+          minColorRange: 0
+          maxColorRange: 100
+          valColorRange: ${{ env.COVERAGE }}

@@ -7,12 +7,16 @@ import (
 	"encoding/json"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/hankwenyx/claude-code-go/pkg/config"
 	"github.com/hankwenyx/claude-code-go/pkg/tools"
 )
 
-const maxOutputChars = 30_000
+const (
+	maxOutputChars = 30_000
+	defaultTimeout = 120 * time.Second
+)
 
 var inputSchema = json.RawMessage(`{
   "type": "object",
@@ -39,8 +43,8 @@ func New() *Tool {
 	return &Tool{Shell: "bash"}
 }
 
-func (t *Tool) Name() string        { return "Bash" }
-func (t *Tool) IsReadOnly() bool    { return false }
+func (t *Tool) Name() string                 { return "Bash" }
+func (t *Tool) IsReadOnly() bool             { return false }
 func (t *Tool) InputSchema() json.RawMessage { return inputSchema }
 func (t *Tool) Description() string {
 	return `Execute a bash command and return its output. Use this for running shell commands, scripts, and system operations.`
@@ -61,6 +65,11 @@ func (t *Tool) Call(ctx context.Context, rawInput json.RawMessage) (tools.ToolRe
 	if shell == "" {
 		shell = "bash"
 	}
+
+	// Apply a hard timeout so runaway commands don't block the agent forever.
+	// If the caller's ctx already has a shorter deadline, that takes precedence.
+	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
+	defer cancel()
 
 	cmd := exec.CommandContext(ctx, shell, "-c", in.Command)
 	var stdout, stderr bytes.Buffer

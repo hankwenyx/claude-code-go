@@ -3,6 +3,8 @@ package config
 import (
 	"path/filepath"
 	"strings"
+
+	"github.com/bmatcuk/doublestar/v4"
 )
 
 // PermissionRules holds the parsed permission rules
@@ -57,7 +59,19 @@ func MatchRule(rule, toolName, arg string) bool {
 		return globMatch(pattern, arg)
 	}
 
-	// For file tools, use filepath.Match (respects path separators)
+	// For file tools, use filepath.Match (respects path separators).
+	// If pattern contains "**", use doublestar for recursive matching.
+	// If pattern doesn't start with "/", also try matching against the basename.
+	if strings.Contains(pattern, "**") {
+		matched, _ := doublestar.Match(pattern, arg)
+		return matched
+	}
+	if !strings.HasPrefix(pattern, "/") {
+		// e.g. "*.go" should match "/home/user/file.go"
+		if matched, err := filepath.Match(pattern, filepath.Base(arg)); err == nil && matched {
+			return true
+		}
+	}
 	matched, err := filepath.Match(pattern, arg)
 	if err != nil {
 		return strings.HasPrefix(arg, pattern)

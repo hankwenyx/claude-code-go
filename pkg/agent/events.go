@@ -1,7 +1,11 @@
 // Package agent provides the core agent loop for Claude Code
 package agent
 
-import "github.com/hankwenyx/claude-code-go/pkg/api"
+import (
+	"time"
+
+	"github.com/hankwenyx/claude-code-go/pkg/api"
+)
 
 // EventType represents the type of an agent event
 type EventType string
@@ -15,18 +19,26 @@ const (
 	EventToolResult EventType = "tool_result"
 	// EventMessage is emitted when a complete assistant message is ready
 	EventMessage EventType = "message"
-	// EventError is emitted when an error occurs
+	// EventError is emitted when an unrecoverable error occurs
 	EventError EventType = "error"
+	// EventRetry is emitted before each retry attempt so the UI can show a wait indicator
+	EventRetry EventType = "retry"
 )
 
 // AgentEvent represents an event from the agent loop
 type AgentEvent struct {
 	Type       EventType
-	Text       string            // EventText: text content
-	ToolCall   *ToolCall         // EventToolUse
-	ToolResult *ToolResult       // EventToolResult
-	Message    *api.Message      // EventMessage
-	Error      error             // EventError
+	Text       string           // EventText: text content
+	ToolCall   *ToolCall        // EventToolUse
+	ToolResult *ToolResult      // EventToolResult
+	Message    *api.Message     // EventMessage
+	Messages   []api.APIMessage // EventMessage: full updated conversation history
+	Usage      *api.Usage       // EventMessage: token usage for this turn
+	Error      error            // EventError
+	// EventRetry fields
+	RetryErr error
+	RetryIn  time.Duration
+	Attempt  int
 }
 
 // ToolCall represents a tool call from the model

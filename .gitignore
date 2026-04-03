@@ -27,6 +27,7 @@ plan.md
 CLAUDE.md
 *.local.md
 TEST_REPORT.md
+CODE_REVIEW.md
 
 # IDE & editor
 .vscode/

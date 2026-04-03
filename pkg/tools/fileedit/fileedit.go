@@ -47,8 +47,8 @@ func New(state *fileread.StateStore) *Tool {
 	return &Tool{State: state}
 }
 
-func (t *Tool) Name() string             { return "Edit" }
-func (t *Tool) IsReadOnly() bool         { return false }
+func (t *Tool) Name() string                 { return "Edit" }
+func (t *Tool) IsReadOnly() bool             { return false }
 func (t *Tool) InputSchema() json.RawMessage { return inputSchema }
 func (t *Tool) Description() string {
 	return `Edit a file by replacing text. The file must have been read first. old_string must uniquely match. Use replace_all to replace every occurrence.`

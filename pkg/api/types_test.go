@@ -7,23 +7,23 @@ import (
 
 func TestContentBlock(t *testing.T) {
 	tests := []struct {
-		name    string
-		block   ContentBlock
+		name     string
+		block    ContentBlock
 		wantJSON string
 	}{
 		{
-			name:    "text block",
-			block:   ContentBlock{Type: "text", Text: "hello"},
+			name:     "text block",
+			block:    ContentBlock{Type: "text", Text: "hello"},
 			wantJSON: `{"type":"text","text":"hello"}`,
 		},
 		{
-			name:    "tool_use block",
-			block:   ContentBlock{Type: "tool_use", ID: "123", Name: "bash", Input: json.RawMessage(`{"cmd":"ls"}`)},
+			name:     "tool_use block",
+			block:    ContentBlock{Type: "tool_use", ID: "123", Name: "bash", Input: json.RawMessage(`{"cmd":"ls"}`)},
 			wantJSON: `{"type":"tool_use","id":"123","name":"bash","input":{"cmd":"ls"}}`,
 		},
 		{
-			name:    "thinking block",
-			block:   ContentBlock{Type: "thinking", Thinking: "let me think..."},
+			name:     "thinking block",
+			block:    ContentBlock{Type: "thinking", Thinking: "let me think..."},
 			wantJSON: `{"type":"thinking","thinking":"let me think..."}`,
 		},
 	}
@@ -43,18 +43,18 @@ func TestContentBlock(t *testing.T) {
 
 func TestToolResultBlock(t *testing.T) {
 	tests := []struct {
-		name    string
-		block   ToolResultBlock
+		name     string
+		block    ToolResultBlock
 		wantJSON string
 	}{
 		{
-			name:    "success result",
-			block:   ToolResultBlock{Type: "tool_result", ToolUseID: "123", Content: "output"},
+			name:     "success result",
+			block:    ToolResultBlock{Type: "tool_result", ToolUseID: "123", Content: "output"},
 			wantJSON: `{"type":"tool_result","tool_use_id":"123","content":"output"}`,
 		},
 		{
-			name:    "error result",
-			block:   ToolResultBlock{Type: "tool_result", ToolUseID: "123", Content: "error", IsError: true},
+			name:     "error result",
+			block:    ToolResultBlock{Type: "tool_result", ToolUseID: "123", Content: "error", IsError: true},
 			wantJSON: `{"type":"tool_result","tool_use_id":"123","content":"error","is_error":true}`,
 		},
 	}

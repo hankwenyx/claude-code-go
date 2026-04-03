@@ -34,9 +34,9 @@ type clientConfig struct {
 	customHeaders map[string]string
 }
 
-func WithModel(model string) ClientOption      { return func(c *clientConfig) { c.model = model } }
-func WithMaxTokens(n int) ClientOption         { return func(c *clientConfig) { c.maxTokens = int64(n) } }
-func WithBaseURL(url string) ClientOption      { return func(c *clientConfig) { c.baseURL = url } }
+func WithModel(model string) ClientOption       { return func(c *clientConfig) { c.model = model } }
+func WithMaxTokens(n int) ClientOption          { return func(c *clientConfig) { c.maxTokens = int64(n) } }
+func WithBaseURL(url string) ClientOption       { return func(c *clientConfig) { c.baseURL = url } }
 func WithHTTPClient(_ interface{}) ClientOption { return func(c *clientConfig) {} } // compat shim
 
 // WithCustomHeaders sets additional HTTP headers sent with every request.

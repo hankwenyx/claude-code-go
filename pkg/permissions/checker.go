@@ -39,6 +39,10 @@ type Checker struct {
 	AdditlDirs     []string // additionalDirectories
 	CWD            string
 	NonInteractive bool // headless: ask → deny
+
+	// AskFunc is called when interactive permission is needed.
+	// Returns true=allow, false=deny. nil = fall back to BehaviorAsk.
+	AskFunc func(toolName, arg, reason string) bool
 }
 
 // Tool is the minimal interface needed by the checker
@@ -66,7 +70,7 @@ func (c *Checker) Check(tool Tool, inputJSON json.RawMessage) Decision {
 	// Check ask rules
 	for _, rule := range c.Rules.Ask {
 		if config.MatchRule(rule, name, arg) {
-			return c.askOrDeny("matched ask rule: " + rule)
+			return c.askOrDeny(name, arg, "matched ask rule: "+rule)
 		}
 	}
 
@@ -80,7 +84,7 @@ func (c *Checker) Check(tool Tool, inputJSON json.RawMessage) Decision {
 	// File writes: safety checks
 	if !tool.IsReadOnly() && isFileTool(name) {
 		if isDangerousPath(arg) {
-			return c.askOrDeny("dangerous path: " + arg)
+			return c.askOrDeny(name, arg, "dangerous path: "+arg)
 		}
 		if c.Mode == ModeAuto || c.Mode == ModeDontAsk {
 			if c.isAllowedPath(arg) {
@@ -97,12 +101,18 @@ func (c *Checker) Check(tool Tool, inputJSON json.RawMessage) Decision {
 	}
 
 	// Default: ask (headless → deny)
-	return c.askOrDeny("no matching allow rule")
+	return c.askOrDeny(name, arg, "no matching allow rule")
 }
 
-func (c *Checker) askOrDeny(reason string) Decision {
+func (c *Checker) askOrDeny(toolName, arg, reason string) Decision {
 	if c.NonInteractive {
 		return Decision{Behavior: BehaviorDeny, Reason: reason + " (non-interactive: ask→deny)"}
+	}
+	if c.AskFunc != nil {
+		if c.AskFunc(toolName, arg, reason) {
+			return Decision{Behavior: BehaviorAllow, Reason: "user approved"}
+		}
+		return Decision{Behavior: BehaviorDeny, Reason: "user denied"}
 	}
 	return Decision{Behavior: BehaviorAsk, Reason: reason}
 }

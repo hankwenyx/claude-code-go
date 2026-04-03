@@ -14,10 +14,10 @@ type mockTool struct {
 	readOnly    bool
 }
 
-func (m *mockTool) Name() string                     { return m.name }
-func (m *mockTool) Description() string              { return m.description }
-func (m *mockTool) InputSchema() json.RawMessage     { return m.schema }
-func (m *mockTool) IsReadOnly() bool                 { return m.readOnly }
+func (m *mockTool) Name() string                 { return m.name }
+func (m *mockTool) Description() string          { return m.description }
+func (m *mockTool) InputSchema() json.RawMessage { return m.schema }
+func (m *mockTool) IsReadOnly() bool             { return m.readOnly }
 func (m *mockTool) Call(ctx context.Context, input json.RawMessage) (ToolResult, error) {
 	return ToolResult{Content: "mock result"}, nil
 }

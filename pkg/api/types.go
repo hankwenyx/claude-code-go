@@ -25,7 +25,7 @@ type ContentBlock struct {
 
 // ToolResultBlock represents a tool result in a user message
 type ToolResultBlock struct {
-	Type      string `json:"type"`                // "tool_result"
+	Type      string `json:"type"` // "tool_result"
 	ToolUseID string `json:"tool_use_id"`
 	Content   string `json:"content"`
 	IsError   bool   `json:"is_error,omitempty"`
@@ -113,7 +113,7 @@ type CreateMessageRequest struct {
 type StreamChunk struct {
 	Type  string      `json:"type"`
 	Data  interface{} `json:"data,omitempty"`
-	Error error        `json:"error,omitempty"`
+	Error error       `json:"error,omitempty"`
 }
 
 // MessageStartEvent represents a message_start event
@@ -124,9 +124,9 @@ type MessageStartEvent struct {
 
 // ContentBlockStartEvent represents a content_block_start event
 type ContentBlockStartEvent struct {
-	Type         string        `json:"type"`
-	Index        int           `json:"index"`
-	ContentBlock ContentBlock  `json:"content_block"`
+	Type         string       `json:"type"`
+	Index        int          `json:"index"`
+	ContentBlock ContentBlock `json:"content_block"`
 }
 
 // ContentBlockDeltaEvent represents a content_block_delta event
@@ -152,9 +152,9 @@ type ContentBlockStopEvent struct {
 
 // MessageDeltaEvent represents a message_delta event
 type MessageDeltaEvent struct {
-	Type       string        `json:"type"`
-	Usage      Usage         `json:"usage,omitempty"`
-	Delta      MessageDelta  `json:"delta,omitempty"`
+	Type  string       `json:"type"`
+	Usage Usage        `json:"usage,omitempty"`
+	Delta MessageDelta `json:"delta,omitempty"`
 }
 
 // MessageDelta represents delta in message

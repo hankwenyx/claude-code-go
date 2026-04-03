@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/hankwenyx/claude-code-go/pkg/config"
@@ -59,8 +60,8 @@ func New(cwd string) *Tool {
 	return &Tool{CWD: cwd}
 }
 
-func (t *Tool) Name() string             { return "Grep" }
-func (t *Tool) IsReadOnly() bool         { return true }
+func (t *Tool) Name() string                 { return "Grep" }
+func (t *Tool) IsReadOnly() bool             { return true }
 func (t *Tool) InputSchema() json.RawMessage { return inputSchema }
 func (t *Tool) Description() string {
 	return `Search for patterns in files using ripgrep (rg) if available, fallback to Go implementation. Supports regex, file globs, and output modes.`
@@ -70,7 +71,7 @@ type input struct {
 	Pattern    string `json:"pattern"`
 	Path       string `json:"path,omitempty"`
 	Glob       string `json:"glob,omitempty"`
-	CaseInsens bool   `json:"_i,omitempty"` // json key "-i" is invalid, handled manually
+	CaseInsens bool   // "-i" key — parsed manually below because "-" is not a valid JSON tag char
 	OutputMode string `json:"output_mode,omitempty"`
 }
 
@@ -172,10 +173,21 @@ func (t *Tool) runRipgrep(ctx context.Context, in input, searchPath string) (too
 }
 
 func (t *Tool) runGoGrep(ctx context.Context, in input, searchPath string) (tools.ToolResult, error) {
-	var matches strings.Builder
-	count := 0
+	// Compile the regex (honour case-insensitive flag via inline flag)
+	pattern := in.Pattern
+	if in.CaseInsens {
+		pattern = "(?i)" + pattern
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return tools.ToolResult{IsError: true, Content: "invalid regex: " + err.Error()}, nil
+	}
 
-	err := filepath.WalkDir(searchPath, func(path string, d fs.DirEntry, err error) error {
+	var matches strings.Builder
+	fileCount := 0 // files_with_matches
+	lineCount := 0 // count mode (total matching lines across all files)
+
+	err = filepath.WalkDir(searchPath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -202,24 +214,25 @@ func (t *Tool) runGoGrep(ctx context.Context, in input, searchPath string) (tool
 
 		scanner := bufio.NewScanner(f)
 		lineNum := 0
+		fileMatched := false
 		for scanner.Scan() {
 			lineNum++
 			line := scanner.Text()
-			matchLine := line
-			matchPattern := in.Pattern
-			if in.CaseInsens {
-				matchLine = strings.ToLower(line)
-				matchPattern = strings.ToLower(in.Pattern)
-			}
-			if strings.Contains(matchLine, matchPattern) {
-				count++
+			if re.MatchString(line) {
+				lineCount++
 				switch in.OutputMode {
 				case "files_with_matches":
-					matches.WriteString(path + "\n")
-					return nil // one match per file is enough
+					if !fileMatched {
+						fileMatched = true
+						fileCount++
+						matches.WriteString(path + "\n")
+					}
+					// continue scanning to count remaining lines (not needed here)
+					// but we can stop early for this file
+					return nil
 				case "count":
-					// count at end
-				default:
+					// keep scanning, accumulate lineCount
+				default: // content
 					matches.WriteString(fmt.Sprintf("%s:%d:%s\n", path, lineNum, line))
 				}
 			}
@@ -231,15 +244,21 @@ func (t *Tool) runGoGrep(ctx context.Context, in input, searchPath string) (tool
 		return tools.ToolResult{IsError: true, Content: fmt.Sprintf("search error: %v", err)}, nil
 	}
 
-	if in.OutputMode == "count" {
-		return tools.ToolResult{Content: fmt.Sprintf("%d", count)}, nil
+	switch in.OutputMode {
+	case "count":
+		return tools.ToolResult{Content: fmt.Sprintf("%d", lineCount)}, nil
+	case "files_with_matches":
+		if fileCount == 0 {
+			return tools.ToolResult{Content: "no matches found"}, nil
+		}
+		return tools.ToolResult{Content: matches.String()}, nil
+	default:
+		result := matches.String()
+		if result == "" {
+			return tools.ToolResult{Content: "no matches found"}, nil
+		}
+		return tools.ToolResult{Content: result}, nil
 	}
-
-	result := matches.String()
-	if result == "" {
-		return tools.ToolResult{Content: "no matches found"}, nil
-	}
-	return tools.ToolResult{Content: result}, nil
 }
 
 func (t *Tool) CheckPermissions(rawInput json.RawMessage, mode string, rules tools.PermissionRules) tools.PermissionDecision {

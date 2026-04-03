@@ -41,8 +41,8 @@ func New(cwd string) *Tool {
 	return &Tool{CWD: cwd}
 }
 
-func (t *Tool) Name() string                { return "Glob" }
-func (t *Tool) IsReadOnly() bool            { return true }
+func (t *Tool) Name() string                 { return "Glob" }
+func (t *Tool) IsReadOnly() bool             { return true }
 func (t *Tool) InputSchema() json.RawMessage { return inputSchema }
 func (t *Tool) Description() string {
 	return `Find files matching a glob pattern. Sorted by modification time (newest first). Returns up to 250 results.`

@@ -1,10 +1,13 @@
 package api
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
 
 // BuildOptions configures system prompt construction
 type BuildOptions struct {
-	ClaudeMdContent string   // formatted CLAUDE.md system-reminder content
+	ClaudeMdContent string // formatted CLAUDE.md system-reminder content
 	CWD             string
 	EnabledTools    []string // tool names to list in prompt
 }
@@ -18,8 +21,8 @@ func BuildSystemPrompt(opts BuildOptions) []SystemBlock {
 	// Block 1: Static content with cache_control
 	static := buildStaticBlock(opts.EnabledTools)
 	blocks = append(blocks, SystemBlock{
-		Type: "text",
-		Text: static,
+		Type:         "text",
+		Text:         static,
 		CacheControl: &CacheControl{Type: "ephemeral"},
 	})
 
@@ -77,6 +80,11 @@ func buildDynamicBlock(opts BuildOptions) string {
 		parts = append(parts, "Current working directory: "+opts.CWD)
 	}
 
-	combined := strings.Join(parts, "\n")
-	return combined
+	parts = append(parts, "Today's date is "+time.Now().Format("2006-01-02")+".")
+
+	if opts.ClaudeMdContent != "" {
+		parts = append(parts, opts.ClaudeMdContent)
+	}
+
+	return strings.Join(parts, "\n")
 }

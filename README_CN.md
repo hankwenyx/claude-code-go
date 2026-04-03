@@ -1,5 +1,9 @@
 # Claude Code Go
 
+[![Go Version](https://img.shields.io/badge/Go-1.24%2B-00ADD8?logo=go&logoColor=white)](https://golang.org)
+[![Coverage](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/hankwenyx/15c8b3d0509c2bfdf27684db18e6dc9c/raw/coverage.json)](TEST_REPORT.md)
+[![License](https://img.shields.io/badge/License-Research_Only-blue)](#license)
+
 [Claude Code](https://github.com/anthropics/claude-code) 的 Go 语言实现。
 
 > **⚠️ 重要声明**
@@ -239,7 +243,7 @@ tail -f ~/.claude/logs/api_debug.log
 
 ## 路线图
 
-### Phase 1 — Headless 核心（已完成）
+### Phase 1 — Headless 核心（✅ 已完成）
 
 > CLI + 可导入 Go 库，无 TUI
 
@@ -258,21 +262,57 @@ tail -f ~/.claude/logs/api_debug.log
 
 ---
 
-### Phase 2 — TUI（终端交互界面）
+### Phase 2 — TUI（终端交互界面）✅
 
 > 接近原版 Claude Code 的交互式终端 UI
 
 | 子阶段 | 内容 | 状态 |
 |--------|------|------|
-| 2a | 基础 REPL：输入框 + 输出区（Markdown 渲染） | 🔲 待做 |
-| 2b | 工具调用 UI：可折叠的工具名/参数/结果，spinner | 🔲 待做 |
-| 2c | 权限对话框：ask 模式下 yes/no/always/skip | 🔲 待做 |
-| 2d | 多行输入、历史记录（上下方向键）、`@file` 提及 | 🔲 待做 |
-| 2e | Slash 命令：`/clear`、`/help`、`/exit`、`/compact`、`/config` | 🔲 待做 |
-| 2f | 状态栏（token 用量、模型名、CWD） | 🔲 待做 |
-| 2g | 聊天视图模式（`SendUserMessage` 工具，`--brief` 参数） | 🔲 待做 |
+| 2a | 基础 REPL：输入框 + 输出区（Markdown 渲染） | ✅ 完成 |
+| 2b | 工具调用 UI：工具名/参数/结果展示，spinner 进度 | ✅ 完成 |
+| 2c | 权限对话框：ask 模式下 yes/no/always/skip | ✅ 完成 |
+| 2d | 多行输入、历史记录（↑/↓ / Ctrl+P/N）、`@file` 提及 | ✅ 完成 |
+| 2e | Slash 命令：`/clear`、`/help`、`/exit`、`/compact`、`/model` | ✅ 完成 |
+| 2f | 状态栏（token 用量、模型名） | ✅ 完成 |
+| 2g | 聊天视图模式（`--brief`，`SendUserMessage` 工具） | ✅ 完成 |
 
 **技术栈：** [Bubbletea](https://github.com/charmbracelet/bubbletea) + Lipgloss + Glamour
+
+**新增 CLI 参数：**
+
+```bash
+claude -i                    # 强制进入 TUI 模式
+claude -i --resume <id>      # 恢复已保存的会话
+claude -i --brief            # 简洁/聊天模式：隐藏工具调用，用 SendUserMessage 回复
+```
+
+**TUI 快捷键：**
+
+| 按键 | 功能 |
+|------|------|
+| Enter | 发送消息 |
+| Ctrl+Enter | 插入换行 |
+| ↑ / Ctrl+P | 上一条历史输入 |
+| ↓ / Ctrl+N | 下一条历史输入 |
+| PgUp / PgDn | 滚动 |
+| Ctrl+C | 退出 |
+
+**TUI Slash 命令：**
+
+| 命令 | 说明 |
+|------|------|
+| `/clear` | 清空对话历史和 token 计数 |
+| `/compact` | 压缩对话历史以减少 token 用量 |
+| `/model [名称]` | 查看或切换当前模型 |
+| `/help` | 显示帮助 |
+| `/exit` | 退出 TUI |
+
+**`@file` 文件提及：**
+
+```
+@README.md              → 内联文件内容
+@./pkg/agent/agent.go   → 相对路径
+```
 
 ---
 

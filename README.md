@@ -1,5 +1,9 @@
 # Claude Code Go
 
+[![Go Version](https://img.shields.io/badge/Go-1.24%2B-00ADD8?logo=go&logoColor=white)](https://golang.org)
+[![Coverage](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/hankwenyx/15c8b3d0509c2bfdf27684db18e6dc9c/raw/coverage.json)](TEST_REPORT.md)
+[![License](https://img.shields.io/badge/License-Research_Only-blue)](#license)
+
 A Go implementation of [Claude Code](https://github.com/anthropics/claude-code).
 
 > **⚠️ Important Notice / 重要声明**
@@ -239,7 +243,7 @@ The log includes the complete outgoing request (messages, system prompt, tools) 
 
 ## Roadmap
 
-### Phase 1 — Headless Core (Current)
+### Phase 1 — Headless Core
 
 > CLI + importable Go library, no TUI
 
@@ -264,15 +268,51 @@ The log includes the complete outgoing request (messages, system prompt, tools) 
 
 | Sub-phase | Content | Status |
 |-----------|---------|--------|
-| 2a | Basic REPL: input box + output area (Markdown rendering) | 🔲 Todo |
-| 2b | Tool call UI: collapsible tool name/args/result, spinner | 🔲 Todo |
-| 2c | Permission dialog: yes/no/always/skip for ask-mode permissions | 🔲 Todo |
-| 2d | Multi-line input, history (up/down), `@file` mention | 🔲 Todo |
-| 2e | Slash commands: `/clear`, `/help`, `/exit`, `/compact`, `/config` | 🔲 Todo |
-| 2f | Status bar (token usage, model name, CWD) | 🔲 Todo |
-| 2g | Chat view mode (`SendUserMessage` tool, `--brief` flag) | 🔲 Todo |
+| 2a | Basic REPL: input box + output area (Markdown rendering) | ✅ Done |
+| 2b | Tool call UI: collapsible tool name/args/result, spinner | ✅ Done |
+| 2c | Permission dialog: yes/no/always/skip for ask-mode permissions | ✅ Done |
+| 2d | Multi-line input, history (↑/↓ / Ctrl+P/N), `@file` mention | ✅ Done |
+| 2e | Slash commands: `/clear`, `/help`, `/exit`, `/compact`, `/model` | ✅ Done |
+| 2f | Status bar (token usage, model name) | ✅ Done |
+| 2g | Chat/brief view mode (`--brief`, `SendUserMessage` tool) | ✅ Done |
 
 **Tech:** [Bubbletea](https://github.com/charmbracelet/bubbletea) + Lipgloss + Glamour
+
+**New CLI flags:**
+
+```bash
+claude -i                    # force TUI mode
+claude -i --resume <id>      # resume a saved session
+claude -i --brief            # brief/chat mode: hide tools, use SendUserMessage
+```
+
+**TUI keyboard shortcuts:**
+
+| Key | Action |
+|-----|--------|
+| Enter | Send message |
+| Ctrl+Enter | Insert newline |
+| ↑ / Ctrl+P | Previous input (history) |
+| ↓ / Ctrl+N | Next input (history) |
+| PgUp / PgDn | Scroll |
+| Ctrl+C | Quit |
+
+**TUI slash commands:**
+
+| Command | Description |
+|---------|-------------|
+| `/clear` | Clear conversation and token counter |
+| `/compact` | Summarise conversation to reduce tokens |
+| `/model [name]` | Show or switch model |
+| `/help` | Show help |
+| `/exit` | Quit TUI |
+
+**`@file` mentions:**
+
+```
+@README.md            → inline file contents
+@./pkg/agent/agent.go → relative path
+```
 
 ---
 

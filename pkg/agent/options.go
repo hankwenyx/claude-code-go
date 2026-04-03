@@ -48,4 +48,10 @@ type AgentOptions struct {
 	// SessionID identifies this agent session for tool result persistence.
 	// If empty, a random ID is generated on first use.
 	SessionID string
+
+	// Messages is the prior conversation history to resume from.
+	// If non-nil, the agent appends to this slice rather than starting fresh.
+	// The caller may pass the updated slice (returned via EventMessage) on the
+	// next turn to maintain multi-turn context.
+	Messages []api.APIMessage
 }

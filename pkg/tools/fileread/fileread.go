@@ -75,8 +75,8 @@ func New(state *StateStore) *Tool {
 	return &Tool{State: state}
 }
 
-func (t *Tool) Name() string             { return "Read" }
-func (t *Tool) IsReadOnly() bool         { return true }
+func (t *Tool) Name() string                 { return "Read" }
+func (t *Tool) IsReadOnly() bool             { return true }
 func (t *Tool) InputSchema() json.RawMessage { return inputSchema }
 func (t *Tool) Description() string {
 	return `Read a file from the filesystem. Returns file content with line numbers (cat -n format). Supports offset and limit for pagination.`
@@ -87,6 +87,8 @@ type input struct {
 	Offset   int    `json:"offset,omitempty"`
 	Limit    int    `json:"limit,omitempty"`
 }
+
+const maxFileBytes = 10 * 1024 * 1024 // 10 MB
 
 func (t *Tool) Call(ctx context.Context, rawInput json.RawMessage) (tools.ToolResult, error) {
 	var in input
@@ -101,6 +103,12 @@ func (t *Tool) Call(ctx context.Context, rawInput json.RawMessage) (tools.ToolRe
 	info, err := os.Stat(in.FilePath)
 	if err != nil {
 		return tools.ToolResult{IsError: true, Content: fmt.Sprintf("cannot stat file: %v", err)}, nil
+	}
+	if info.Size() > maxFileBytes {
+		return tools.ToolResult{IsError: true, Content: fmt.Sprintf(
+			"file too large to read (%d bytes, limit %d). Use offset/limit to read specific ranges.",
+			info.Size(), maxFileBytes,
+		)}, nil
 	}
 
 	// Track file state for FileEdit validation
@@ -147,7 +155,8 @@ func (t *Tool) Call(ctx context.Context, rawInput json.RawMessage) (tools.ToolRe
 func (t *Tool) CheckPermissions(rawInput json.RawMessage, mode string, rules tools.PermissionRules) tools.PermissionDecision {
 	var in input
 	if err := json.Unmarshal(rawInput, &in); err != nil {
-		return tools.PermissionDecision{Behavior: "deny", Reason: "invalid input"}
+		// Read-only tool: allow even with invalid input (actual call will fail gracefully)
+		return tools.PermissionDecision{Behavior: "allow", Reason: "read-only default allow"}
 	}
 
 	cfgRules := config.PermissionRules{Allow: rules.Allow, Deny: rules.Deny, Ask: rules.Ask}

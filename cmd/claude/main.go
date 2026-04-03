@@ -4,14 +4,16 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"os"
 	"strings"
 
-	"github.com/spf13/cobra"
+	"github.com/hankwenyx/claude-code-go/cmd/claude/tui"
 	"github.com/hankwenyx/claude-code-go/pkg/agent"
 	"github.com/hankwenyx/claude-code-go/pkg/api"
 	"github.com/hankwenyx/claude-code-go/pkg/config"
 	"github.com/hankwenyx/claude-code-go/pkg/permissions"
+	"github.com/hankwenyx/claude-code-go/pkg/session"
 	"github.com/hankwenyx/claude-code-go/pkg/tools"
 	"github.com/hankwenyx/claude-code-go/pkg/tools/bash"
 	"github.com/hankwenyx/claude-code-go/pkg/tools/fileedit"
@@ -19,14 +21,22 @@ import (
 	"github.com/hankwenyx/claude-code-go/pkg/tools/filewrite"
 	"github.com/hankwenyx/claude-code-go/pkg/tools/glob"
 	"github.com/hankwenyx/claude-code-go/pkg/tools/grep"
+	"github.com/hankwenyx/claude-code-go/pkg/tools/sendmsg"
 	"github.com/hankwenyx/claude-code-go/pkg/tools/webfetch"
+	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 var (
-	model     string
-	maxTokens int
-	apiKey    string
-	noTools   bool
+	model             string
+	maxTokens         int
+	apiKey            string
+	noTools           bool
+	allowRules        []string
+	bypassPermissions bool
+	forceInteractive  bool
+	resumeSession     string
+	briefMode         bool
 )
 
 func main() {
@@ -56,6 +66,17 @@ func init() {
 	rootCmd.Flags().IntVarP(&maxTokens, "max-tokens", "t", 0, "Maximum output tokens (default: 4096)")
 	rootCmd.Flags().StringVarP(&apiKey, "api-key", "k", "", "Anthropic API key (default: from settings or env)")
 	rootCmd.Flags().BoolVar(&noTools, "no-tools", false, "Disable all tools (single-turn text only)")
+	rootCmd.Flags().StringArrayVar(&allowRules, "allow", nil, `Add a permission allow rule for this run, e.g. --allow "Bash(git *)" (repeatable)`)
+	rootCmd.Flags().BoolVar(&bypassPermissions, "bypass-permissions", false, "Skip all permission checks for this run")
+	rootCmd.Flags().BoolVarP(&forceInteractive, "interactive", "i", false, "Force interactive TUI mode (even when a message is provided)")
+	rootCmd.Flags().StringVar(&resumeSession, "resume", "", "Resume a saved session by ID (use with -i or headless)")
+	rootCmd.Flags().BoolVar(&briefMode, "brief", false, "Brief/chat mode: hide tool calls, use SendUserMessage for replies")
+}
+
+// isInteractive returns true when both stdin and stdout are terminals
+func isInteractive() bool {
+	return term.IsTerminal(int(os.Stdin.Fd())) &&
+		term.IsTerminal(int(os.Stdout.Fd()))
 }
 
 func run(cmd *cobra.Command, args []string) {
@@ -81,7 +102,7 @@ func run(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	// Get message
+	// Get message and determine mode
 	var message string
 	if len(args) > 0 {
 		message = args[0]
@@ -96,7 +117,14 @@ func run(cmd *cobra.Command, args []string) {
 			message = strings.Join(lines, "\n")
 		}
 	}
-	if message == "" {
+
+	// Decide whether to launch the TUI.
+	// TUI launches automatically when stdin and stdout are both terminals and
+	// no message is provided (original Claude Code behaviour).
+	// Use -i to force TUI even with a message; pipe input to force headless.
+	launchTUI := forceInteractive || (isInteractive() && message == "")
+
+	if !launchTUI && message == "" {
 		fmt.Fprintln(os.Stderr, "Error: no message provided")
 		os.Exit(1)
 	}
@@ -130,6 +158,10 @@ func run(cmd *cobra.Command, args []string) {
 		registry.Register(glob.New(cwd))
 		registry.Register(grep.New(cwd))
 		registry.Register(webfetch.New())
+		// Brief/chat mode: register SendUserMessage so the model uses it for replies
+		if briefMode {
+			registry.Register(sendmsg.New())
+		}
 	}
 
 	// Build permission checker
@@ -137,15 +169,20 @@ func run(cmd *cobra.Command, args []string) {
 	if settings != nil {
 		permRules = config.ParsePermissionRules(settings.Permissions)
 	}
+	// --allow flag appends rules for this run only
+	permRules.Allow = append(permRules.Allow, allowRules...)
+
 	permMode := permissions.ModeAuto
-	if settings != nil && settings.Permissions.DefaultMode != "" {
+	if bypassPermissions {
+		permMode = permissions.ModeBypassPermissions
+	} else if settings != nil && settings.Permissions.DefaultMode != "" {
 		permMode = permissions.Mode(settings.Permissions.DefaultMode)
 	}
 	permChecker := &permissions.Checker{
 		Mode:           permMode,
 		Rules:          permRules,
 		CWD:            cwd,
-		NonInteractive: true,
+		NonInteractive: !launchTUI,
 	}
 	if settings != nil {
 		permChecker.AdditlDirs = settings.Permissions.AdditionalDirs
@@ -169,7 +206,7 @@ func run(cmd *cobra.Command, args []string) {
 		ClaudeMdContent: claudeMdContent,
 		Registry:        registry,
 		PermChecker:     permChecker,
-		NonInteractive:  true,
+		NonInteractive:  !launchTUI,
 	}
 	// Priority: --model flag > ANTHROPIC_MODEL env (from settings) > settings.model field > default
 	if model != "" {
@@ -194,7 +231,26 @@ func run(cmd *cobra.Command, args []string) {
 		api.WithModel(opts.Model),
 	)...)
 
-	// Run agent
+	// Dispatch: TUI or headless
+	if launchTUI {
+		// Resolve session: load existing or generate a new ID
+		sessID, resumeHistory := resolveSession(cwd, resumeSession)
+		opts.SessionID = sessID
+		if len(resumeHistory) > 0 {
+			opts.Messages = resumeHistory
+		}
+		if err := tui.Run(cmd.Context(), opts, permChecker, tui.RunOptions{
+			SessionID:     sessID,
+			ResumeHistory: resumeHistory,
+			BriefMode:     briefMode,
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// Headless: run agent and stream to stdout/stderr
 	events := agent.RunAgent(cmd.Context(), message, opts)
 
 	for event := range events {
@@ -268,4 +324,18 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// resolveSession returns a session ID and prior message history.
+// If resumeID is non-empty, it loads that session; otherwise it generates a fresh ID.
+func resolveSession(cwd, resumeID string) (id string, history []api.APIMessage) {
+	if resumeID != "" {
+		rec, err := session.Load(cwd, resumeID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not load session %q: %v\n", resumeID, err)
+		} else {
+			return rec.ID, rec.Messages
+		}
+	}
+	return fmt.Sprintf("%016x", rand.Int63()), nil
 }

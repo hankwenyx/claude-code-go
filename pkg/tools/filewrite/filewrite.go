@@ -38,8 +38,8 @@ func New(state *fileread.StateStore) *Tool {
 	return &Tool{State: state}
 }
 
-func (t *Tool) Name() string             { return "Write" }
-func (t *Tool) IsReadOnly() bool         { return false }
+func (t *Tool) Name() string                 { return "Write" }
+func (t *Tool) IsReadOnly() bool             { return false }
 func (t *Tool) InputSchema() json.RawMessage { return inputSchema }
 func (t *Tool) Description() string {
 	return `Write content to a file, creating it or overwriting it. Creates parent directories as needed.`
@@ -65,7 +65,13 @@ func (t *Tool) Call(ctx context.Context, rawInput json.RawMessage) (tools.ToolRe
 		return tools.ToolResult{IsError: true, Content: fmt.Sprintf("cannot create directories: %v", err)}, nil
 	}
 
-	if err := os.WriteFile(in.FilePath, []byte(in.Content), 0644); err != nil {
+	// Preserve existing file permissions; new files get 0666 (umask applied by OS)
+	perm := os.FileMode(0666)
+	if si, err := os.Stat(in.FilePath); err == nil {
+		perm = si.Mode().Perm()
+	}
+
+	if err := os.WriteFile(in.FilePath, []byte(in.Content), perm); err != nil {
 		return tools.ToolResult{IsError: true, Content: fmt.Sprintf("cannot write file: %v", err)}, nil
 	}
 

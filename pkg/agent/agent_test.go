@@ -2,13 +2,16 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/hankwenyx/claude-code-go/pkg/api"
+	"github.com/hankwenyx/claude-code-go/pkg/tools"
 )
 
 func TestRunAgent(t *testing.T) {
@@ -270,5 +273,204 @@ data: {}
 	}
 	if text != "OK" {
 		t.Errorf("text: got %q", text)
+	}
+}
+
+// mockTool is a simple tool for testing that returns a fixed result.
+type mockTool struct {
+	name   string
+	result string
+	called atomic.Bool
+}
+
+func (m *mockTool) Name() string                 { return m.name }
+func (m *mockTool) Description() string          { return "mock tool" }
+func (m *mockTool) InputSchema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
+func (m *mockTool) IsReadOnly() bool             { return true }
+func (m *mockTool) Call(_ context.Context, _ json.RawMessage) (tools.ToolResult, error) {
+	m.called.Store(true)
+	return tools.ToolResult{Content: m.result}, nil
+}
+func (m *mockTool) CheckPermissions(_ json.RawMessage, _ string, _ tools.PermissionRules) tools.PermissionDecision {
+	return tools.PermissionDecision{Behavior: "allow"}
+}
+
+// TestRunAgentToolUse verifies the full tool_use → tool_result → text loop:
+// Turn 1: model emits a tool_use block → agent calls the tool
+// Turn 2: server returns the final text reply
+func TestRunAgentToolUse(t *testing.T) {
+	// Turn 1: assistant wants to call "MockTool"
+	turn1 := `event: message_start
+data: {"type":"message_start","message":{"id":"msg_t1","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-6","stop_reason":"","usage":{"input_tokens":10,"output_tokens":0}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01","name":"MockTool"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":5}}
+
+event: message_stop
+data: {}
+`
+	// Turn 2: assistant returns final answer after seeing the tool result
+	turn2 := `event: message_start
+data: {"type":"message_start","message":{"id":"msg_t2","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-6","stop_reason":"","usage":{"input_tokens":20,"output_tokens":0}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"tool result was: mock-output"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":8}}
+
+event: message_stop
+data: {}
+`
+	var requestCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		n := requestCount.Add(1)
+		if n == 1 {
+			w.Write([]byte(turn1))
+		} else {
+			w.Write([]byte(turn2))
+		}
+	}))
+	defer server.Close()
+
+	tool := &mockTool{name: "MockTool", result: "mock-output"}
+	reg := tools.NewRegistry()
+	reg.Register(tool)
+
+	client := api.NewClient("test-key", api.WithBaseURL(server.URL))
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var toolUseEvents []string
+	var toolResultEvents []string
+	var textParts []string
+
+	events := RunAgent(ctx, "use the tool", AgentOptions{
+		Client:   client,
+		Registry: reg,
+	})
+	for ev := range events {
+		switch ev.Type {
+		case EventToolUse:
+			toolUseEvents = append(toolUseEvents, ev.ToolCall.Name)
+		case EventToolResult:
+			toolResultEvents = append(toolResultEvents, ev.ToolResult.Content)
+		case EventText:
+			textParts = append(textParts, ev.Text)
+		case EventError:
+			t.Fatalf("unexpected error: %v", ev.Error)
+		}
+	}
+
+	// Tool must have been called
+	if !tool.called.Load() {
+		t.Error("mockTool.Call was never invoked")
+	}
+	// EventToolUse emitted with correct name
+	if len(toolUseEvents) != 1 || toolUseEvents[0] != "MockTool" {
+		t.Errorf("toolUseEvents: %v", toolUseEvents)
+	}
+	// EventToolResult carries the mock output
+	if len(toolResultEvents) != 1 || toolResultEvents[0] != "mock-output" {
+		t.Errorf("toolResultEvents: %v", toolResultEvents)
+	}
+	// Final text contains the tool result echoed back
+	finalText := strings.Join(textParts, "")
+	if !strings.Contains(finalText, "mock-output") {
+		t.Errorf("final text %q does not mention tool result", finalText)
+	}
+	// Two HTTP requests: one per turn
+	if n := requestCount.Load(); n != 2 {
+		t.Errorf("expected 2 HTTP requests, got %d", n)
+	}
+}
+
+// TestRunAgentMultiTurnHistory verifies that opts.Messages is forwarded to the
+// second RunAgent call, so conversation context is preserved across TUI turns.
+func TestRunAgentMultiTurnHistory(t *testing.T) {
+	sseResp := `event: message_start
+data: {"type":"message_start","message":{"id":"msg_h","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-6","stop_reason":"","usage":{"input_tokens":5,"output_tokens":0}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"reply"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}
+
+event: message_stop
+data: {}
+`
+	var lastBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lastBody, _ = json.Marshal(nil) // reset
+		if err := json.NewDecoder(r.Body).Decode(&lastBody); err == nil {
+			_ = lastBody
+		}
+		// Re-read properly
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte(sseResp))
+	}))
+	defer server.Close()
+
+	client := api.NewClient("test-key", api.WithBaseURL(server.URL))
+	ctx := context.Background()
+
+	// Turn 1
+	var history []api.APIMessage
+	for ev := range RunAgent(ctx, "first message", AgentOptions{Client: client}) {
+		if ev.Type == EventMessage {
+			history = ev.Messages
+		}
+	}
+	if len(history) == 0 {
+		t.Fatal("EventMessage.Messages is empty after turn 1")
+	}
+
+	// Turn 2 — pass history back; server receives both messages
+	var seenMessages []api.APIMessage
+	server2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Messages []api.APIMessage `json:"messages"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		seenMessages = req.Messages
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte(sseResp))
+	}))
+	defer server2.Close()
+
+	client2 := api.NewClient("test-key", api.WithBaseURL(server2.URL))
+	for range RunAgent(ctx, "second message", AgentOptions{
+		Client:   client2,
+		Messages: history,
+	}) {
+	}
+
+	// The second request should contain at least the prior user+assistant turn
+	// plus the new user message → at least 3 messages total
+	if len(seenMessages) < 3 {
+		t.Errorf("expected ≥3 messages in turn-2 request, got %d: %+v", len(seenMessages), seenMessages)
 	}
 }

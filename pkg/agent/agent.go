@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/hankwenyx/claude-code-go/pkg/api"
 	"github.com/hankwenyx/claude-code-go/pkg/tools"
@@ -59,13 +61,21 @@ func runLoop(ctx context.Context, initialMessage string, opts AgentOptions, even
 	}
 
 	// Build conversation history.
+	// Resume from prior messages when provided (multi-turn TUI usage).
 	// Merge CLAUDE.md into the first user message to avoid consecutive user messages,
 	// which some API proxies (e.g. Qianfan/glm-5) do not support.
-	firstMsg := initialMessage
-	if opts.ClaudeMdContent != "" {
-		firstMsg = "<system-reminder>\n" + opts.ClaudeMdContent + "\n</system-reminder>\n\n" + initialMessage
+	var messages []api.APIMessage
+	if len(opts.Messages) > 0 {
+		messages = make([]api.APIMessage, len(opts.Messages))
+		copy(messages, opts.Messages)
+		messages = append(messages, api.NewUserTextMessage(initialMessage))
+	} else {
+		firstMsg := initialMessage
+		if opts.ClaudeMdContent != "" {
+			firstMsg = "<system-reminder>\n" + opts.ClaudeMdContent + "\n</system-reminder>\n\n" + initialMessage
+		}
+		messages = []api.APIMessage{api.NewUserTextMessage(firstMsg)}
 	}
-	messages := []api.APIMessage{api.NewUserTextMessage(firstMsg)}
 
 	maxTurns := opts.MaxTurns
 	if maxTurns == 0 {
@@ -87,19 +97,46 @@ func runLoop(ctx context.Context, initialMessage string, opts AgentOptions, even
 			req.Thinking = &api.ThinkingConfig{Type: "adaptive"}
 		}
 
-		// Stream the response
-		chunks, err := client.StreamMessage(ctx, req)
-		if err != nil {
-			events <- AgentEvent{Type: EventError, Error: err}
-			return
+		// Stream the response — with retry on transient errors.
+		var (
+			chunks    <-chan api.StreamChunk
+			streamErr error
+		)
+		const maxRetries = 4
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			if attempt > 0 {
+				wait := retryBackoff(attempt)
+				events <- AgentEvent{Type: EventRetry, RetryIn: wait, RetryErr: streamErr, Attempt: attempt}
+				select {
+				case <-ctx.Done():
+					events <- AgentEvent{Type: EventError, Error: ctx.Err()}
+					return
+				case <-time.After(wait):
+				}
+			}
+			chunks, streamErr = client.StreamMessage(ctx, req)
+			if streamErr == nil {
+				break
+			}
+			if !isRetryable(streamErr) || attempt == maxRetries-1 {
+				events <- AgentEvent{Type: EventError, Error: streamErr}
+				return
+			}
 		}
 
 		// Process stream and collect tool calls
 		resp := api.NewStreamResponse()
 		needsFollowUp := false
+		var streamFailed bool
 
 		for chunk := range chunks {
 			if chunk.Error != nil {
+				if isRetryable(chunk.Error) {
+					// Mid-stream retryable error: retry the whole turn from scratch
+					streamFailed = true
+					streamErr = chunk.Error
+					break
+				}
 				events <- AgentEvent{Type: EventError, Error: chunk.Error}
 				return
 			}
@@ -128,6 +165,68 @@ func runLoop(ctx context.Context, initialMessage string, opts AgentOptions, even
 			}
 		}
 
+		if streamFailed {
+			// Retry the turn: reset partial state and go back to top of turn loop
+			for attempt := 1; attempt < maxRetries; attempt++ {
+				wait := retryBackoff(attempt)
+				events <- AgentEvent{Type: EventRetry, RetryIn: wait, RetryErr: streamErr, Attempt: attempt}
+				select {
+				case <-ctx.Done():
+					events <- AgentEvent{Type: EventError, Error: ctx.Err()}
+					return
+				case <-time.After(wait):
+				}
+				chunks, streamErr = client.StreamMessage(ctx, req)
+				if streamErr != nil {
+					if !isRetryable(streamErr) || attempt == maxRetries-1 {
+						events <- AgentEvent{Type: EventError, Error: streamErr}
+						return
+					}
+					continue
+				}
+				// Re-drain the retried stream
+				resp = api.NewStreamResponse()
+				needsFollowUp = false
+				streamFailed = false
+				for chunk := range chunks {
+					if chunk.Error != nil {
+						if isRetryable(chunk.Error) && attempt < maxRetries-1 {
+							streamFailed = true
+							streamErr = chunk.Error
+							break
+						}
+						events <- AgentEvent{Type: EventError, Error: chunk.Error}
+						return
+					}
+					if err := resp.ProcessChunk(chunk); err != nil {
+						events <- AgentEvent{Type: EventError, Error: err}
+						return
+					}
+					if chunk.Type == "content_block_delta" {
+						if delta, ok := chunk.Data.(api.ContentBlockDeltaEvent); ok {
+							if delta.Delta.Type == "text_delta" {
+								events <- AgentEvent{Type: EventText, Text: delta.Delta.Text}
+							}
+						}
+					}
+					if chunk.Type == "content_block_start" {
+						if start, ok := chunk.Data.(api.ContentBlockStartEvent); ok {
+							if start.ContentBlock.Type == "tool_use" {
+								needsFollowUp = true
+							}
+						}
+					}
+				}
+				if !streamFailed {
+					break
+				}
+			}
+			if streamFailed {
+				events <- AgentEvent{Type: EventError, Error: streamErr}
+				return
+			}
+		}
+
 		// Append assistant message to history
 		assistantContent, _ := json.Marshal(resp.Message.Content)
 		messages = append(messages, api.APIMessage{
@@ -136,8 +235,14 @@ func runLoop(ctx context.Context, initialMessage string, opts AgentOptions, even
 		})
 
 		if !needsFollowUp {
-			// Done
-			events <- AgentEvent{Type: EventMessage, Message: &resp.Message}
+			// Done — emit the final message with updated conversation history and usage
+			u := resp.Message.Usage
+			events <- AgentEvent{
+				Type:     EventMessage,
+				Message:  &resp.Message,
+				Messages: messages,
+				Usage:    &u,
+			}
 			return
 		}
 
@@ -388,4 +493,58 @@ func writeResultToDisk(toolUseID, content string, opts AgentOptions) (string, er
 		return "", err
 	}
 	return path, nil
+}
+
+// isRetryable returns true for transient errors that should be retried:
+// rate limits (429), server overload (529), network timeouts, and
+// proxy-specific messages from services like Qianfan.
+func isRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	// Standard HTTP status codes embedded in error messages
+	for _, pat := range []string{
+		"429", "529", "503", "502", "504",
+		"rate limit", "ratelimit", "rate_limit",
+		"too many request",
+		"quota", "超限", "限流", "qps",
+		"overloaded", "overload",
+		"timeout", "timed out", "deadline exceeded",
+		"connection reset", "connection refused",
+		"eof", "broken pipe", "i/o timeout",
+	} {
+		if strings.Contains(msg, pat) {
+			return true
+		}
+	}
+	// Check for http.StatusTooManyRequests via error interface
+	type statusCoder interface{ StatusCode() int }
+	if sc, ok := err.(statusCoder); ok {
+		code := sc.StatusCode()
+		return code == http.StatusTooManyRequests ||
+			code == http.StatusServiceUnavailable ||
+			code == http.StatusBadGateway ||
+			code == http.StatusGatewayTimeout ||
+			code == 529
+	}
+	return false
+}
+
+// retryBackoff returns the wait duration for a retry attempt using
+// exponential backoff with ±20% jitter: base=2s, max=30s.
+func retryBackoff(attempt int) time.Duration {
+	const base = 2 * time.Second
+	const maxWait = 30 * time.Second
+	wait := base * (1 << uint(attempt-1)) // 2s, 4s, 8s, 16s...
+	if wait > maxWait {
+		wait = maxWait
+	}
+	// ±20% jitter
+	jitter := time.Duration(rand.Int63n(int64(wait/5)*2) - int64(wait/5))
+	wait += jitter
+	if wait < time.Second {
+		wait = time.Second
+	}
+	return wait
 }

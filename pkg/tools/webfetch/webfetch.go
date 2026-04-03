@@ -54,8 +54,8 @@ func New() *Tool {
 	}
 }
 
-func (t *Tool) Name() string                { return "WebFetch" }
-func (t *Tool) IsReadOnly() bool            { return true }
+func (t *Tool) Name() string                 { return "WebFetch" }
+func (t *Tool) IsReadOnly() bool             { return true }
 func (t *Tool) InputSchema() json.RawMessage { return inputSchema }
 func (t *Tool) Description() string {
 	return `Fetch content from a URL. Converts HTML to markdown. Caches responses for 15 minutes. Content > 100,000 characters is truncated.`
@@ -107,6 +107,10 @@ func (t *Tool) Call(ctx context.Context, rawInput json.RawMessage) (tools.ToolRe
 		return tools.ToolResult{IsError: true, Content: fmt.Sprintf("read error: %v", err)}, nil
 	}
 
+	// NOTE: The `prompt` field is accepted by the schema for API compatibility but is
+	// not used for content extraction in this implementation. The full page markdown
+	// is returned as-is. Implementing prompt-based summarisation would require an
+	// additional LLM API call which is out of scope for the current phase.
 	content := convertHTML(string(bodyBytes))
 	if len(content) > maxContentChars {
 		content = content[:maxContentChars] + "\n... (content truncated)"
