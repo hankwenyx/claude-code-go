@@ -84,19 +84,19 @@ func (t *Tool) Call(ctx context.Context, rawInput json.RawMessage) (tools.ToolRe
 
 	in := input{}
 	if v, ok := raw["pattern"]; ok {
-		json.Unmarshal(v, &in.Pattern)
+		_ = json.Unmarshal(v, &in.Pattern)
 	}
 	if v, ok := raw["path"]; ok {
-		json.Unmarshal(v, &in.Path)
+		_ = json.Unmarshal(v, &in.Path)
 	}
 	if v, ok := raw["glob"]; ok {
-		json.Unmarshal(v, &in.Glob)
+		_ = json.Unmarshal(v, &in.Glob)
 	}
 	if v, ok := raw["-i"]; ok {
-		json.Unmarshal(v, &in.CaseInsens)
+		_ = json.Unmarshal(v, &in.CaseInsens)
 	}
 	if v, ok := raw["output_mode"]; ok {
-		json.Unmarshal(v, &in.OutputMode)
+		_ = json.Unmarshal(v, &in.OutputMode)
 	}
 
 	if in.Pattern == "" {
@@ -214,7 +214,6 @@ func (t *Tool) runGoGrep(ctx context.Context, in input, searchPath string) (tool
 
 		scanner := bufio.NewScanner(f)
 		lineNum := 0
-		fileMatched := false
 		for scanner.Scan() {
 			lineNum++
 			line := scanner.Text()
@@ -222,13 +221,9 @@ func (t *Tool) runGoGrep(ctx context.Context, in input, searchPath string) (tool
 				lineCount++
 				switch in.OutputMode {
 				case "files_with_matches":
-					if !fileMatched {
-						fileMatched = true
-						fileCount++
-						matches.WriteString(path + "\n")
-					}
-					// continue scanning to count remaining lines (not needed here)
-					// but we can stop early for this file
+					fileCount++
+					matches.WriteString(path + "\n")
+					// Stop after first match for files_with_matches mode
 					return nil
 				case "count":
 					// keep scanning, accumulate lineCount
@@ -264,10 +259,10 @@ func (t *Tool) runGoGrep(ctx context.Context, in input, searchPath string) (tool
 func (t *Tool) CheckPermissions(rawInput json.RawMessage, mode string, rules tools.PermissionRules) tools.PermissionDecision {
 	cfgRules := config.PermissionRules{Allow: rules.Allow, Deny: rules.Deny, Ask: rules.Ask}
 	var raw map[string]json.RawMessage
-	json.Unmarshal(rawInput, &raw)
+	_ = json.Unmarshal(rawInput, &raw)
 	var path string
 	if v, ok := raw["path"]; ok {
-		json.Unmarshal(v, &path)
+		_ = json.Unmarshal(v, &path)
 	}
 	for _, rule := range cfgRules.Deny {
 		if config.MatchRule(rule, t.Name(), path) {

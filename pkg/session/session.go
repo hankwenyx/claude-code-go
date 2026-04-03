@@ -1,6 +1,7 @@
 // Package session handles conversation persistence.
 // Sessions are stored as JSON files under:
-//   ~/.claude/projects/{cwd-slug}/sessions/{sessionID}.json
+//
+//	~/.claude/projects/{cwd-slug}/sessions/{sessionID}.json
 package session
 
 import (

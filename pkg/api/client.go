@@ -250,7 +250,7 @@ func buildParams(model string, maxTokens int64, req CreateMessageRequest) anthro
 				betaProps = props
 			}
 			if req2, ok := raw["required"]; ok {
-				json.Unmarshal(req2, &betaReq)
+				_ = json.Unmarshal(req2, &betaReq)
 			}
 		}
 		p.Tools = append(p.Tools, anthropic.BetaToolUnionParam{

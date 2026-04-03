@@ -1,7 +1,7 @@
 # Claude Code Go
 
 [![Go Version](https://img.shields.io/badge/Go-1.24%2B-00ADD8?logo=go&logoColor=white)](https://golang.org)
-[![Coverage](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/hankwenyx/15c8b3d0509c2bfdf27684db18e6dc9c/raw/coverage.json)](TEST_REPORT.md)
+[![Coverage](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/hankwenyx/15c8b3d0509c2bfdf27684db18e6dc9c/raw)](TEST_REPORT.md)
 [![License](https://img.shields.io/badge/License-Research_Only-blue)](#license)
 
 [Claude Code](https://github.com/anthropics/claude-code) 的 Go 语言实现。

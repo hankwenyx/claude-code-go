@@ -207,9 +207,9 @@ func TestFileEdit_FileNotExist(t *testing.T) {
 	tool := New(store)
 
 	input, _ := json.Marshal(map[string]interface{}{
-		"file_path":   "/nonexistent/file.txt",
-		"old_string":  "x",
-		"new_string":  "y",
+		"file_path":  "/nonexistent/file.txt",
+		"old_string": "x",
+		"new_string": "y",
 	})
 
 	result, _ := tool.Call(context.Background(), input)
@@ -229,9 +229,9 @@ func TestFileEdit_InvalidJSON(t *testing.T) {
 func TestFileEdit_EmptyFilePath(t *testing.T) {
 	tool := New(nil)
 	input, _ := json.Marshal(map[string]interface{}{
-		"file_path":   "",
-		"old_string":  "x",
-		"new_string":  "y",
+		"file_path":  "",
+		"old_string": "x",
+		"new_string": "y",
 	})
 	result, _ := tool.Call(context.Background(), input)
 	if !result.IsError {
@@ -249,9 +249,9 @@ func TestFileEdit_OldStringNotFound(t *testing.T) {
 
 	tool := New(store)
 	input, _ := json.Marshal(map[string]interface{}{
-		"file_path":   f,
-		"old_string":  "nonexistent",
-		"new_string":  "replacement",
+		"file_path":  f,
+		"old_string": "nonexistent",
+		"new_string": "replacement",
 	})
 
 	result, _ := tool.Call(context.Background(), input)
@@ -337,9 +337,9 @@ func TestFileEdit_CheckPermissions_MatchRule(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			input, _ := json.Marshal(map[string]interface{}{
-				"file_path":   tt.path,
-				"old_string":  "x",
-				"new_string":  "y",
+				"file_path":  tt.path,
+				"old_string": "x",
+				"new_string": "y",
 			})
 			d := tool.CheckPermissions(input, "default", tt.rules)
 			if d.Behavior != tt.expected {

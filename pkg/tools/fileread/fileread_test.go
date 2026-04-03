@@ -237,9 +237,8 @@ func TestFileRead_OffsetExceedsFile(t *testing.T) {
 	})
 	result, _ := tool.Call(context.Background(), input)
 	// Should handle gracefully - either error or empty content
-	if result.IsError && !strings.Contains(result.Content, "exceeds") {
-		// File read should work, just return empty content for large offset
-	}
+	// Large offset may return empty content or error with "exceeds" message
+	_ = result
 }
 
 func TestFileRead_DirectoryPath(t *testing.T) {

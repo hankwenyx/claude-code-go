@@ -112,7 +112,7 @@ func (t *Tool) Call(ctx context.Context, rawInput json.RawMessage) (tools.ToolRe
 func (t *Tool) CheckPermissions(rawInput json.RawMessage, mode string, rules tools.PermissionRules) tools.PermissionDecision {
 	cfgRules := config.PermissionRules{Allow: rules.Allow, Deny: rules.Deny, Ask: rules.Ask}
 	var in input
-	json.Unmarshal(rawInput, &in)
+	_ = json.Unmarshal(rawInput, &in)
 
 	for _, rule := range cfgRules.Deny {
 		if config.MatchRule(rule, t.Name(), in.Pattern) {

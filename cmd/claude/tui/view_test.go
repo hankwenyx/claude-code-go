@@ -18,9 +18,9 @@ func TestExpandAtMentions(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "subdir", "nested.md"), []byte("# Nested"), 0644)
 
 	tests := []struct {
-		name     string
-		input    string
-		contains string
+		name        string
+		input       string
+		contains    string
 		notContains string
 	}{
 		{
@@ -54,9 +54,9 @@ func TestExpandAtMentions(t *testing.T) {
 			contains: "# Nested",
 		},
 		{
-			name:     "multiple mentions",
-			input:    "compare @test.txt and @code.go",
-			contains: "file content here",
+			name:        "multiple mentions",
+			input:       "compare @test.txt and @code.go",
+			contains:    "file content here",
 			notContains: "@test.txt",
 		},
 	}
