@@ -47,6 +47,7 @@ CODE_REVIEW.md
 
 # Claude config (local state)
 .claude/
+memory/
 
 # Origin Source code
 origin_src/

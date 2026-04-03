@@ -4,7 +4,7 @@
 [![Coverage](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/hankwenyx/15c8b3d0509c2bfdf27684db18e6dc9c/raw)](TEST_REPORT.md)
 [![License](https://img.shields.io/badge/License-Research_Only-blue)](#license)
 
-基于 Claude 的交互式命令行软件工程 Agent。
+Claude Code 的 Go 实现版本，基于 Claude Code 源码改写而来。
 
 > **⚠️ 重要声明**
 >
