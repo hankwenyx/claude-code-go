@@ -18,17 +18,50 @@ type PermissionsSettings struct {
 	AdditionalDirs []string `json:"additionalDirectories,omitempty"`
 }
 
+// MCPServerConfig describes a single MCP server entry in settings.json.
+// Either Command (stdio) or URL (SSE) must be set.
+type MCPServerConfig struct {
+	Command string            `json:"command,omitempty"`
+	Args    []string          `json:"args,omitempty"`
+	Env     map[string]string `json:"env,omitempty"`
+	URL     string            `json:"url,omitempty"`
+}
+
 // SettingsJson maps to a single settings.json file
+// HookDef is a single hook command entry.
+type HookDef struct {
+	Type      string `json:"type"`                // "command"
+	Command   string `json:"command"`             // shell command
+	TimeoutMs int    `json:"timeoutMs,omitempty"` // 0 = 60s default
+}
+
+// HookGroup pairs a tool-name matcher with a list of hook commands.
+// An empty Matcher matches all tools.
+type HookGroup struct {
+	Matcher string    `json:"matcher,omitempty"`
+	Hooks   []HookDef `json:"hooks"`
+}
+
+// HooksConfig mirrors the "hooks" key in settings.json.
+type HooksConfig struct {
+	PreToolUse   []HookGroup `json:"PreToolUse,omitempty"`
+	PostToolUse  []HookGroup `json:"PostToolUse,omitempty"`
+	Notification []HookGroup `json:"Notification,omitempty"`
+	Stop         []HookGroup `json:"Stop,omitempty"`
+}
+
 type SettingsJson struct {
-	Model             string              `json:"model,omitempty"`
-	Permissions       PermissionsSettings `json:"permissions,omitempty"`
-	Env               map[string]string   `json:"env,omitempty"`
-	RespectGitignore  *bool               `json:"respectGitignore,omitempty"`
-	AlwaysThinking    *bool               `json:"alwaysThinkingEnabled,omitempty"`
-	Language          string              `json:"language,omitempty"`
-	OutputStyle       string              `json:"outputStyle,omitempty"`
-	CleanupPeriodDays *int                `json:"cleanupPeriodDays,omitempty"`
-	DefaultShell      string              `json:"defaultShell,omitempty"` // "bash"|"powershell"
+	Model             string                     `json:"model,omitempty"`
+	Permissions       PermissionsSettings        `json:"permissions,omitempty"`
+	Env               map[string]string          `json:"env,omitempty"`
+	RespectGitignore  *bool                      `json:"respectGitignore,omitempty"`
+	AlwaysThinking    *bool                      `json:"alwaysThinkingEnabled,omitempty"`
+	Language          string                     `json:"language,omitempty"`
+	OutputStyle       string                     `json:"outputStyle,omitempty"`
+	CleanupPeriodDays *int                       `json:"cleanupPeriodDays,omitempty"`
+	DefaultShell      string                     `json:"defaultShell,omitempty"` // "bash"|"powershell"
+	MCPServers        map[string]MCPServerConfig `json:"mcpServers,omitempty"`
+	Hooks             HooksConfig                `json:"hooks,omitempty"`
 }
 
 // MergedSettings is the final merged configuration
@@ -40,6 +73,8 @@ type MergedSettings struct {
 	AlwaysThinking   bool
 	Language         string
 	DefaultShell     string
+	MCPServers       map[string]MCPServerConfig
+	Hooks            HooksConfig
 }
 
 // APIKey returns the best available API key from merged env, checking
@@ -184,6 +219,7 @@ func mergeSettings(layers []SettingsJson) *MergedSettings {
 	m := &MergedSettings{
 		RespectGitignore: true, // default
 		Env:              make(map[string]string),
+		MCPServers:       make(map[string]MCPServerConfig),
 	}
 
 	for _, s := range layers {
@@ -208,6 +244,11 @@ func mergeSettings(layers []SettingsJson) *MergedSettings {
 			m.Env[k] = v
 		}
 
+		// Merge mcpServers (later overrides earlier by name)
+		for k, v := range s.MCPServers {
+			m.MCPServers[k] = v
+		}
+
 		// Merge permissions - arrays are appended and deduplicated
 		m.Permissions.Allow = mergeStringSlice(m.Permissions.Allow, s.Permissions.Allow)
 		m.Permissions.Deny = mergeStringSlice(m.Permissions.Deny, s.Permissions.Deny)
@@ -217,6 +258,12 @@ func mergeSettings(layers []SettingsJson) *MergedSettings {
 		if s.Permissions.DefaultMode != "" {
 			m.Permissions.DefaultMode = s.Permissions.DefaultMode
 		}
+
+		// Merge hooks — later layers append their groups
+		m.Hooks.PreToolUse = append(m.Hooks.PreToolUse, s.Hooks.PreToolUse...)
+		m.Hooks.PostToolUse = append(m.Hooks.PostToolUse, s.Hooks.PostToolUse...)
+		m.Hooks.Notification = append(m.Hooks.Notification, s.Hooks.Notification...)
+		m.Hooks.Stop = append(m.Hooks.Stop, s.Hooks.Stop...)
 	}
 
 	return m

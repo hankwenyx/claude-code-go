@@ -23,6 +23,9 @@ const (
 	EventError EventType = "error"
 	// EventRetry is emitted before each retry attempt so the UI can show a wait indicator
 	EventRetry EventType = "retry"
+	// EventCompact is emitted when the conversation history is auto-compacted
+	// to stay within the CompactThreshold token budget.
+	EventCompact EventType = "compact"
 )
 
 // AgentEvent represents an event from the agent loop

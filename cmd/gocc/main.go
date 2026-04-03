@@ -2,16 +2,20 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"math/rand"
 	"os"
 	"strings"
 
-	"github.com/hankwenyx/claude-code-go/cmd/claude/tui"
+	"github.com/hankwenyx/claude-code-go/cmd/gocc/tui"
 	"github.com/hankwenyx/claude-code-go/pkg/agent"
 	"github.com/hankwenyx/claude-code-go/pkg/api"
 	"github.com/hankwenyx/claude-code-go/pkg/config"
+	"github.com/hankwenyx/claude-code-go/pkg/hooks"
+	"github.com/hankwenyx/claude-code-go/pkg/mcp"
+	"github.com/hankwenyx/claude-code-go/pkg/memory"
 	"github.com/hankwenyx/claude-code-go/pkg/permissions"
 	"github.com/hankwenyx/claude-code-go/pkg/session"
 	"github.com/hankwenyx/claude-code-go/pkg/tools"
@@ -22,6 +26,8 @@ import (
 	"github.com/hankwenyx/claude-code-go/pkg/tools/glob"
 	"github.com/hankwenyx/claude-code-go/pkg/tools/grep"
 	"github.com/hankwenyx/claude-code-go/pkg/tools/sendmsg"
+	agentTask "github.com/hankwenyx/claude-code-go/pkg/tools/task"
+	"github.com/hankwenyx/claude-code-go/pkg/tools/todo"
 	"github.com/hankwenyx/claude-code-go/pkg/tools/webfetch"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -37,6 +43,7 @@ var (
 	forceInteractive  bool
 	resumeSession     string
 	briefMode         bool
+	permissiveMode    bool
 )
 
 func main() {
@@ -47,16 +54,16 @@ func main() {
 }
 
 var rootCmd = &cobra.Command{
-	Use:   "claude [message]",
+	Use:   "gocc [message]",
 	Short: "Claude Code CLI - AI-powered coding assistant",
 	Long: `Claude Code CLI is an AI-powered coding assistant that helps you with
 software engineering tasks. It can read files, edit code, run commands,
 and more.
 
 Examples:
-  claude "hello"
-  claude "list .go files"
-  echo "what is this project?" | claude`,
+  gocc "hello"
+  gocc "list .go files"
+  echo "what is this project?" | gocc`,
 	Args: cobra.MaximumNArgs(1),
 	Run:  run,
 }
@@ -71,6 +78,7 @@ func init() {
 	rootCmd.Flags().BoolVarP(&forceInteractive, "interactive", "i", false, "Force interactive TUI mode (even when a message is provided)")
 	rootCmd.Flags().StringVar(&resumeSession, "resume", "", "Resume a saved session by ID (use with -i or headless)")
 	rootCmd.Flags().BoolVar(&briefMode, "brief", false, "Brief/chat mode: hide tool calls, use SendUserMessage for replies")
+	rootCmd.Flags().BoolVar(&permissiveMode, "permissive", false, "Allow all reads/fetches/safe commands freely; ask user before anything else (e.g. rm, sudo)")
 }
 
 // isInteractive returns true when both stdin and stdout are terminals
@@ -147,6 +155,11 @@ func run(cmd *cobra.Command, args []string) {
 		claudeMdContent = config.FormatClaudeMdMessage(claudeMds, config.CurrentDate())
 	}
 
+	// Load project MEMORY.md and append to CLAUDE.md content
+	if memContent, err := memory.LoadMemory(cwd); err == nil && memContent != "" {
+		claudeMdContent += "\n\n# Auto Memory\n" + memContent
+	}
+
 	// Build tool registry
 	registry := tools.NewRegistry()
 	if !noTools {
@@ -162,6 +175,10 @@ func run(cmd *cobra.Command, args []string) {
 		if briefMode {
 			registry.Register(sendmsg.New())
 		}
+		// Todo tools (Phase 4e): shared in-memory store
+		todoStore := todo.NewStore()
+		registry.Register(todo.NewWriteTool(todoStore))
+		registry.Register(todo.NewReadTool(todoStore))
 	}
 
 	// Build permission checker
@@ -171,6 +188,41 @@ func run(cmd *cobra.Command, args []string) {
 	}
 	// --allow flag appends rules for this run only
 	permRules.Allow = append(permRules.Allow, allowRules...)
+
+	// --permissive: allow all reads and common safe commands; deny dangerous destructive ones
+	if permissiveMode {
+		permRules.Allow = append(permRules.Allow,
+			"Read",        // all file reads
+			"Glob",        // file listing
+			"Grep",        // file search
+			"WebFetch",    // HTTP reads
+			"Bash(git *)", // git read ops (log, diff, status…)
+			"Bash(go *)",  // go tool
+			"Bash(make *)",
+			"Bash(cat *)",
+			"Bash(ls *)",
+			"Bash(find *)",
+			"Bash(grep *)",
+			"Bash(echo *)",
+			"Bash(pwd)",
+			"Bash(env)",
+			"Bash(which *)",
+			"Bash(type *)",
+			"Bash(head *)",
+			"Bash(tail *)",
+			"Bash(wc *)",
+			"Bash(sort *)",
+			"Bash(uniq *)",
+			"Bash(awk *)",
+			"Bash(sed *)",
+			"Bash(jq *)",
+			"Bash(curl *)",
+			"Bash(wget *)",
+		)
+		// Note: commands NOT in the allow list (e.g. rm, sudo) will still
+		// trigger the normal ask/deny flow — user gets a confirmation prompt
+		// in TUI mode, and is denied in headless mode. No extra deny rules needed.
+	}
 
 	permMode := permissions.ModeAuto
 	if bypassPermissions {
@@ -187,6 +239,33 @@ func run(cmd *cobra.Command, args []string) {
 	if settings != nil {
 		permChecker.AdditlDirs = settings.Permissions.AdditionalDirs
 	}
+
+	// Connect MCP servers from settings (best-effort; errors printed to stderr)
+	mcpManager := mcp.NewManager()
+	if settings != nil && len(settings.MCPServers) > 0 {
+		mcpCfgs := make(map[string]mcp.ServerConfig, len(settings.MCPServers))
+		for name, sc := range settings.MCPServers {
+			mcpCfgs[name] = mcp.ServerConfig{
+				Command: sc.Command,
+				Args:    sc.Args,
+				Env:     sc.Env,
+				URL:     sc.URL,
+			}
+		}
+		if errs := mcpManager.Connect(cmd.Context(), mcpCfgs); len(errs) > 0 {
+			for _, e := range errs {
+				fmt.Fprintf(os.Stderr, "Warning: %v\n", e)
+			}
+		}
+		mcpManager.RegisterAll(registry)
+	}
+	defer mcpManager.Close()
+
+	// Task tool (Phase 4a/4b): sub-agent runner closes over opts built below.
+	// We build a forward-declared runner so opts can reference taskManager.
+	taskManager := agentTask.NewManager(32)
+	// taskRunner is filled in after opts is fully constructed (below).
+	var taskRunner agentTask.SubAgentRunner
 
 	// Build system prompt
 	var toolNames []string
@@ -230,6 +309,29 @@ func run(cmd *cobra.Command, args []string) {
 	opts.Client = api.NewClient(key, append(clientOpts,
 		api.WithModel(opts.Model),
 	)...)
+	opts.TaskManager = taskManager
+
+	// Wire hooks runner from settings
+	if len(settings.Hooks.PreToolUse) > 0 || len(settings.Hooks.PostToolUse) > 0 ||
+		len(settings.Hooks.Notification) > 0 || len(settings.Hooks.Stop) > 0 {
+		hr := hooks.New(settings.Hooks)
+		hr.CWD = cwd
+		opts.HookRunner = hr
+	}
+
+	// Wire up the Task tool now that opts is complete.
+	// The runner captures opts by value so each sub-agent gets a clean copy
+	// (no prior conversation history, no recursive TaskManager to avoid loops).
+	if !noTools {
+		taskRunner = func(ctx context.Context, prompt string) (string, error) {
+			subOpts := opts
+			subOpts.Messages = nil    // fresh conversation
+			subOpts.TaskManager = nil // no nested async tasks
+			subOpts.MaxTurns = 20     // safety limit for sub-agents
+			return agent.RunAgentSync(ctx, prompt, subOpts)
+		}
+		registry.Register(agentTask.NewWithManager(taskRunner, taskManager))
+	}
 
 	// Dispatch: TUI or headless
 	if launchTUI {

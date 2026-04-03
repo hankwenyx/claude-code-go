@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,7 +12,10 @@ import (
 	"time"
 
 	"github.com/hankwenyx/claude-code-go/pkg/api"
+	"github.com/hankwenyx/claude-code-go/pkg/config"
+	"github.com/hankwenyx/claude-code-go/pkg/permissions"
 	"github.com/hankwenyx/claude-code-go/pkg/tools"
+	"github.com/hankwenyx/claude-code-go/pkg/tools/task"
 )
 
 func TestRunAgent(t *testing.T) {
@@ -398,6 +402,297 @@ data: {}
 	// Two HTTP requests: one per turn
 	if n := requestCount.Load(); n != 2 {
 		t.Errorf("expected 2 HTTP requests, got %d", n)
+	}
+}
+
+// ---- Unit tests for unexported helpers ----
+
+func TestIsRetryable(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"429 in message", fmt.Errorf("HTTP 429 too many requests"), true},
+		{"529 in message", fmt.Errorf("server returned 529"), true},
+		{"503", fmt.Errorf("503 service unavailable"), true},
+		{"502", fmt.Errorf("bad gateway 502"), true},
+		{"504", fmt.Errorf("gateway timeout 504"), true},
+		{"rate limit", fmt.Errorf("rate limit exceeded"), true},
+		{"ratelimit", fmt.Errorf("ratelimit hit"), true},
+		{"rate_limit", fmt.Errorf("rate_limit exceeded"), true},
+		{"too many request", fmt.Errorf("too many request from client"), true},
+		{"quota", fmt.Errorf("quota exceeded"), true},
+		{"qps", fmt.Errorf("qps exceeded"), true},
+		{"overloaded", fmt.Errorf("server overloaded"), true},
+		{"overload", fmt.Errorf("model overload"), true},
+		{"timeout", fmt.Errorf("request timeout"), true},
+		{"timed out", fmt.Errorf("connection timed out"), true},
+		{"deadline exceeded", fmt.Errorf("context deadline exceeded"), true},
+		{"connection reset", fmt.Errorf("connection reset by peer"), true},
+		{"connection refused", fmt.Errorf("connection refused"), true},
+		{"eof", fmt.Errorf("unexpected EOF"), true},
+		{"broken pipe", fmt.Errorf("broken pipe"), true},
+		{"i/o timeout", fmt.Errorf("read: i/o timeout"), true},
+		{"超限", fmt.Errorf("超限错误"), true},
+		{"限流", fmt.Errorf("限流触发"), true},
+		{"ordinary error", fmt.Errorf("invalid API key"), false},
+		{"not found", fmt.Errorf("404 not found"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isRetryable(tc.err); got != tc.want {
+				t.Errorf("isRetryable(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+type statusCodeErr struct {
+	code int
+}
+
+func (e statusCodeErr) Error() string   { return fmt.Sprintf("http %d", e.code) }
+func (e statusCodeErr) StatusCode() int { return e.code }
+
+func TestIsRetryable_StatusCoder(t *testing.T) {
+	cases := []struct {
+		code int
+		want bool
+	}{
+		{429, true},
+		{503, true},
+		{502, true},
+		{504, true},
+		{529, true},
+		{401, false},
+		{404, false},
+		{200, false},
+	}
+	for _, tc := range cases {
+		if got := isRetryable(statusCodeErr{tc.code}); got != tc.want {
+			t.Errorf("isRetryable(status=%d) = %v, want %v", tc.code, got, tc.want)
+		}
+	}
+}
+
+func TestRetryBackoff(t *testing.T) {
+	for attempt := 1; attempt <= 6; attempt++ {
+		d := retryBackoff(attempt)
+		if d < time.Second {
+			t.Errorf("attempt %d: backoff %v < 1s minimum", attempt, d)
+		}
+		if d > 40*time.Second { // 30s max + 20% jitter headroom
+			t.Errorf("attempt %d: backoff %v exceeds reasonable max", attempt, d)
+		}
+	}
+	// Higher attempt should cap near maxWait (30s)
+	d := retryBackoff(10)
+	if d < 20*time.Second {
+		t.Errorf("attempt 10: expected near-maxWait, got %v", d)
+	}
+}
+
+func TestPersistToolResult_WritesToDisk(t *testing.T) {
+	large := strings.Repeat("z", 10000)
+	opts := AgentOptions{
+		CWD:       t.TempDir(),
+		SessionID: "sess-abc",
+	}
+	out := persistToolResult("toolu_big", large, opts)
+	if !strings.Contains(out, "persisted-output") {
+		t.Errorf("expected persisted-output tag: %q", out)
+	}
+	if !strings.Contains(out, "10000") {
+		t.Errorf("expected byte count in output: %q", out)
+	}
+}
+
+func TestPersistToolResult_DiskFallback(t *testing.T) {
+	// Use an invalid CWD so disk write fails — falls back to inline truncation
+	opts := AgentOptions{
+		CWD:       "/nonexistent/xyz/that/cannot/be/created",
+		SessionID: "s",
+	}
+	content := strings.Repeat("y", 5000)
+	out := persistToolResult("t1", content, opts)
+	if !strings.Contains(out, "persisted-output") {
+		t.Errorf("expected persisted-output tag: %q", out)
+	}
+}
+
+func TestCallTool_NotFound(t *testing.T) {
+	events := make(chan AgentEvent, 10)
+	tu := api.ContentBlock{
+		Type:  "tool_use",
+		ID:    "toolu_nf",
+		Name:  "NoSuchTool",
+		Input: json.RawMessage(`{}`),
+	}
+	opts := AgentOptions{Registry: tools.NewRegistry()}
+	result := callTool(context.Background(), tu, opts, events)
+	close(events)
+
+	if !result.IsError {
+		t.Error("expected IsError=true")
+	}
+	if !strings.Contains(result.Content, "tool not found") {
+		t.Errorf("content: %q", result.Content)
+	}
+	var types []EventType
+	for ev := range events {
+		types = append(types, ev.Type)
+	}
+	if len(types) != 2 {
+		t.Errorf("expected 2 events (EventToolUse+EventToolResult), got %v", types)
+	}
+}
+
+func TestCallTool_PermissionDenied(t *testing.T) {
+	events := make(chan AgentEvent, 10)
+
+	tool := &mockTool{name: "Restricted"}
+	reg := tools.NewRegistry()
+	reg.Register(tool)
+
+	// Checker with a deny rule for "Restricted" tool + non-interactive so ask→deny
+	checker := &permissions.Checker{
+		Mode:           permissions.ModeDefault,
+		NonInteractive: true,
+		Rules:          config.PermissionRules{Deny: []string{"Restricted"}},
+	}
+
+	tu := api.ContentBlock{
+		Type:  "tool_use",
+		ID:    "toolu_deny",
+		Name:  "Restricted",
+		Input: json.RawMessage(`{}`),
+	}
+	opts := AgentOptions{Registry: reg, PermChecker: checker}
+	result := callTool(context.Background(), tu, opts, events)
+	close(events)
+
+	if !result.IsError {
+		t.Error("expected IsError=true for denied tool")
+	}
+	if !strings.Contains(result.Content, "permission denied") {
+		t.Errorf("content: %q", result.Content)
+	}
+	if tool.called.Load() {
+		t.Error("tool should not have been called when permission denied")
+	}
+}
+
+func TestRunAgent_MaxTurns(t *testing.T) {
+	toolUseResp := `event: message_start
+data: {"type":"message_start","message":{"id":"msg_mt","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-6","stop_reason":"","usage":{"input_tokens":5,"output_tokens":0}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01","name":"MockTool"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":5}}
+
+event: message_stop
+data: {}
+`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte(toolUseResp))
+	}))
+	defer server.Close()
+
+	tool := &mockTool{name: "MockTool", result: "r"}
+	reg := tools.NewRegistry()
+	reg.Register(tool)
+
+	client := api.NewClient("test-key", api.WithBaseURL(server.URL))
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err := RunAgentSync(ctx, "loop", AgentOptions{
+		Client:   client,
+		Registry: reg,
+		MaxTurns: 2,
+	})
+	if err == nil {
+		t.Fatal("expected max turns error")
+	}
+	if !strings.Contains(err.Error(), "max turns") {
+		t.Errorf("expected 'max turns' error, got: %v", err)
+	}
+}
+
+func TestRunAgent_TaskManagerNotifications(t *testing.T) {
+	sseResp := `event: message_start
+data: {"type":"message_start","message":{"id":"msg_n","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-6","stop_reason":"","usage":{"input_tokens":5,"output_tokens":0}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}
+
+event: message_stop
+data: {}
+`
+	var capturedBodies []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]json.RawMessage
+		json.NewDecoder(r.Body).Decode(&body)
+		if msgs, ok := body["messages"]; ok {
+			capturedBodies = append(capturedBodies, string(msgs))
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte(sseResp))
+	}))
+	defer server.Close()
+
+	client := api.NewClient("test-key", api.WithBaseURL(server.URL))
+
+	mgr := task.NewManager(4)
+	done := make(chan struct{})
+	runner := func(_ context.Context, _ string) (string, error) {
+		<-done
+		return "background done", nil
+	}
+	mgr.Dispatch(context.Background(), "bg-task", "do something", runner)
+	close(done)
+	time.Sleep(80 * time.Millisecond) // let goroutine finish
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for range RunAgent(ctx, "check tasks", AgentOptions{
+		Client:      client,
+		TaskManager: mgr,
+	}) {
+	}
+
+	if len(capturedBodies) == 0 {
+		t.Fatal("no requests captured")
+	}
+	found := false
+	for _, b := range capturedBodies {
+		if strings.Contains(b, "task-notification") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("task-notification not found in any request body; bodies: %v", capturedBodies)
 	}
 }
 

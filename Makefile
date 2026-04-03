@@ -1,11 +1,11 @@
 .PHONY: build clean test run install fmt lint
 
-BINARY=claude
+BINARY=gocc
 BUILD_DIR=./bin
 
 build:
 	@mkdir -p $(BUILD_DIR)
-	go build -o $(BUILD_DIR)/$(BINARY) ./cmd/claude
+	go build -o $(BUILD_DIR)/$(BINARY) ./cmd/gocc
 
 clean:
 	rm -rf $(BUILD_DIR)

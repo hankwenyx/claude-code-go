@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/hankwenyx/claude-code-go/pkg/api"
+	"github.com/hankwenyx/claude-code-go/pkg/memory"
 	"github.com/hankwenyx/claude-code-go/pkg/tools"
 )
 
@@ -82,7 +83,34 @@ func runLoop(ctx context.Context, initialMessage string, opts AgentOptions, even
 		maxTurns = 50 // default safety limit
 	}
 
+	// Running token counter for auto-compaction (Phase 5a).
+	var totalTokens int
+
 	for turn := 0; turn < maxTurns; turn++ {
+		// Inject any completed async-task notifications from sub-agents.
+		// Each notification is added as a user/assistant message pair so the
+		// model knows a background task has finished without breaking the
+		// alternating user/assistant message pattern.
+		if opts.TaskManager != nil {
+			for _, n := range opts.TaskManager.DrainNotifications() {
+				t := n.Task
+				status := "completed"
+				body := t.Result
+				if t.Err != nil {
+					status = "failed"
+					body = t.Err.Error()
+				}
+				notifText := fmt.Sprintf(
+					"<task-notification task_id=%q description=%q status=%q>\n%s\n</task-notification>",
+					t.ID, t.Description, status, body,
+				)
+				messages = append(messages, api.NewUserTextMessage(notifText))
+				messages = append(messages, api.NewAssistantTextMessage(
+					fmt.Sprintf("Noted: background task %q has %s.", t.Description, status),
+				))
+			}
+		}
+
 		// Build request
 		req := api.CreateMessageRequest{
 			Model:    opts.Model,
@@ -233,6 +261,18 @@ func runLoop(ctx context.Context, initialMessage string, opts AgentOptions, even
 			Role:    "assistant",
 			Content: json.RawMessage(assistantContent),
 		})
+
+		// Accumulate token usage for auto-compaction (Phase 5a).
+		u := resp.Message.Usage
+		totalTokens += u.InputTokens + u.OutputTokens
+		if opts.CompactThreshold > 0 && totalTokens >= opts.CompactThreshold && client != nil {
+			compacted, _, compactErr := memory.CompactMessages(ctx, client, messages)
+			if compactErr == nil {
+				messages = compacted
+				totalTokens = 0
+				events <- AgentEvent{Type: EventCompact}
+			}
+		}
 
 		if !needsFollowUp {
 			// Done — emit the final message with updated conversation history and usage
@@ -386,8 +426,33 @@ func callTool(ctx context.Context, tu api.ContentBlock, opts AgentOptions, event
 		}
 	}
 
+	// PreToolUse hook: may block or modify input
+	toolInput := tu.Input
+	if opts.HookRunner != nil {
+		modified, blockReason, err := opts.HookRunner.RunPreToolUse(ctx, tu.Name, toolInput)
+		if err != nil {
+			content := "hook error: " + err.Error()
+			events <- AgentEvent{
+				Type:       EventToolResult,
+				ToolResult: &ToolResult{ToolUseID: tu.ID, Content: content, IsError: true},
+			}
+			return api.ToolResultBlock{Type: "tool_result", ToolUseID: tu.ID, Content: content, IsError: true}
+		}
+		if blockReason != "" {
+			content := "blocked by hook: " + blockReason
+			events <- AgentEvent{
+				Type:       EventToolResult,
+				ToolResult: &ToolResult{ToolUseID: tu.ID, Content: content, IsError: true},
+			}
+			return api.ToolResultBlock{Type: "tool_result", ToolUseID: tu.ID, Content: content, IsError: true}
+		}
+		if modified != nil {
+			toolInput = modified
+		}
+	}
+
 	// Execute tool
-	toolResult, err := t.Call(ctx, tu.Input)
+	toolResult, err := t.Call(ctx, toolInput)
 	content := toolResult.Content
 	isError := toolResult.IsError
 	if err != nil {
@@ -398,6 +463,13 @@ func callTool(ctx context.Context, tu api.ContentBlock, opts AgentOptions, event
 	// Truncate / persist large results
 	if len(content) > tools.DefaultMaxResultSize {
 		content = persistToolResult(tu.ID, content, opts)
+	}
+
+	// PostToolUse hook: may modify output
+	if opts.HookRunner != nil {
+		if modified, herr := opts.HookRunner.RunPostToolUse(ctx, tu.Name, toolInput, content, isError); herr == nil {
+			content = modified
+		}
 	}
 
 	events <- AgentEvent{

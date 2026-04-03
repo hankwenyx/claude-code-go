@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/hankwenyx/claude-code-go/pkg/agent"
 	"github.com/hankwenyx/claude-code-go/pkg/api"
+	"github.com/hankwenyx/claude-code-go/pkg/memory"
 	"github.com/hankwenyx/claude-code-go/pkg/session"
 )
 
@@ -111,6 +112,9 @@ type Model struct {
 	// retryStatus: shown in status bar during retry wait ("⟳ rate limited, retry 1/3 in 4s…")
 	retryStatus string
 
+	// pendingInputs: messages queued while agent is running (auto-submitted in order when agent finishes)
+	pendingInputs []string
+
 	fatalErr error
 }
 
@@ -181,13 +185,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handlePermKey(msg)
 		}
 
-		// Normal input handling when agent is not running
+		// Scroll keys work regardless of agent state
+		if key.Matches(msg, keys.ScrollUp) {
+			m.viewport.ScrollUp(5)
+			return m, nil
+		}
+		if key.Matches(msg, keys.ScrollDown) {
+			m.viewport.ScrollDown(5)
+			return m, nil
+		}
+
 		if m.eventChan == nil {
+			// Agent idle — normal submit/history/textarea handling
 			if key.Matches(msg, keys.Submit) {
 				input := strings.TrimSpace(m.textarea.Value())
 				if input != "" {
 					// Handle slash commands before dispatching to agent
-					if handled, newModel := m.handleSlashCommand(input); handled {
+					if handled, newModel, slashCmd := m.handleSlashCommand(input); handled {
+						// /exit returns tea.Quit directly
+						if slashCmd != nil {
+							return newModel, slashCmd
+						}
+						// /compact sets an eventChan — kick off the listener
+						if newModel.eventChan != nil {
+							return newModel, listenAgent(newModel.eventChan)
+						}
 						return newModel, nil
 					}
 					return m.submitInput(input)
@@ -201,16 +223,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if key.Matches(msg, keys.HistoryNext) && m.textarea.Line() == 0 {
 				return m.historyNavigate(+1), nil
 			}
-			// Scroll
-			if key.Matches(msg, keys.ScrollUp) {
-				m.viewport.ScrollUp(5)
-				return m, nil
-			}
-			if key.Matches(msg, keys.ScrollDown) {
-				m.viewport.ScrollDown(5)
-				return m, nil
-			}
 			// Pass to textarea
+			var taCmd tea.Cmd
+			m.textarea, taCmd = m.textarea.Update(msg)
+			cmds = append(cmds, taCmd)
+		} else {
+			// Agent running — allow composing the next message; queue on Enter
+			if key.Matches(msg, keys.Submit) {
+				input := strings.TrimSpace(m.textarea.Value())
+				if input != "" {
+					m.pendingInputs = append(m.pendingInputs, input)
+					m.textarea.Reset()
+					m = m.rebuildViewport()
+				}
+				return m, tea.Batch(cmds...)
+			}
+			// Escape cancels the last queued message
+			if key.Matches(msg, keys.CancelQueue) && len(m.pendingInputs) > 0 {
+				m.pendingInputs = m.pendingInputs[:len(m.pendingInputs)-1]
+				m = m.rebuildViewport()
+				return m, tea.Batch(cmds...)
+			}
+			// Pass keystrokes to textarea so user can type the next message
 			var taCmd tea.Cmd
 			m.textarea, taCmd = m.textarea.Update(msg)
 			cmds = append(cmds, taCmd)
@@ -247,6 +281,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// re-enable input
 		m.inputReady = true
 		cmds = append(cmds, m.textarea.Focus())
+		// Auto-submit the first queued message (typed while agent was running)
+		if len(m.pendingInputs) > 0 {
+			pending := m.pendingInputs[0]
+			m.pendingInputs = m.pendingInputs[1:]
+			newModel, submitCmd := m.submitInput(pending)
+			return newModel, tea.Batch(append(cmds, submitCmd)...)
+		}
 
 	case permAskMsg:
 		m.pendingAsk = &permAskRequest{
@@ -276,6 +317,7 @@ func (m Model) handleAgentEvent(ev agent.AgentEvent) (Model, []tea.Cmd) {
 
 	switch ev.Type {
 	case agent.EventText:
+		m.retryStatus = "" // clear any lingering retry banner once response starts
 		m.outputBuf.WriteString(ev.Text)
 		m = m.rebuildViewport()
 
@@ -313,6 +355,7 @@ func (m Model) handleAgentEvent(ev agent.AgentEvent) (Model, []tea.Cmd) {
 		m = m.rebuildViewport()
 
 	case agent.EventToolUse:
+		m.retryStatus = "" // clear retry banner when model starts acting
 		sp := spinner.New()
 		sp.Spinner = spinner.Dot
 		sp.Style = toolSpinnerStyle
@@ -482,7 +525,7 @@ func newTextareaKeyMap() textarea.KeyMap {
 
 // handleSlashCommand intercepts /clear, /help, /model, and /compact typed by the user.
 // Returns (true, newModel) when the command was handled, (false, m) otherwise.
-func (m Model) handleSlashCommand(input string) (bool, Model) {
+func (m Model) handleSlashCommand(input string) (bool, Model, tea.Cmd) {
 	m.textarea.Reset()
 	cmd := strings.ToLower(strings.TrimSpace(input))
 
@@ -500,7 +543,7 @@ func (m Model) handleSlashCommand(input string) (bool, Model) {
 		m.historyIdx = 0
 		m.historyDraft = ""
 		m = m.rebuildViewport()
-		return true, m
+		return true, m, nil
 
 	case cmd == "/help":
 		helpText := `**Keyboard shortcuts**
@@ -545,7 +588,7 @@ func (m Model) handleSlashCommand(input string) (bool, Model) {
 			m.rendered = helpText
 		}
 		m = m.rebuildViewport()
-		return true, m
+		return true, m, nil
 
 	case cmd == "/model" || strings.HasPrefix(cmd, "/model "):
 		parts := strings.SplitN(strings.TrimSpace(input), " ", 2)
@@ -583,46 +626,29 @@ func (m Model) handleSlashCommand(input string) (bool, Model) {
 			}
 		}
 		m = m.rebuildViewport()
-		return true, m
+		return true, m, nil
 
 	case cmd == "/compact":
-		return true, m.startCompact()
+		return true, m.startCompact(), nil
 
 	case cmd == "/exit" || cmd == "/quit":
-		// Signal quit — bubbletea will handle the tea.Quit cmd
-		// We return handled=true but the caller needs to actually quit.
-		// We stash a flag using fatalErr=nil sentinel; the Update loop calls tea.Quit.
-		// Simplest: just set a special rendered message and let the outer handler quit.
-		// Actually the cleanest way is to return (false, m) and let the caller handle it.
-		// But since handleSlashCommand only returns (bool, Model), we use a workaround:
-		// write a note and return; the outer Update will call tea.Quit via Ctrl+C logic.
-		// For simplicity, treat /exit as a cancel-and-quit.
 		if m.cancel != nil {
 			m.cancel()
 		}
-		// We can't call tea.Quit here, so we set a quit flag via fatalErr sentinel.
-		// Use a special marker error.
-		m.fatalErr = errQuit
-		return true, m
+		return true, m, tea.Quit
 	}
 
-	return false, m
+	return false, m, nil
 }
 
-// startCompact asks the model to summarise the conversation, then replaces the
-// history with a single condensed turn to reduce future token usage.
+// startCompact uses memory.CompactMessages to summarise the conversation
+// and replaces the history with the compact summary.
 func (m Model) startCompact() Model {
 	if len(m.conversationHistory) == 0 {
 		m.rendered = "_No conversation to compact._\n"
 		m = m.rebuildViewport()
 		return m
 	}
-
-	summaryRequest := "Please summarise the conversation so far concisely, preserving all important context, decisions, and file changes. This summary will replace the full history to reduce token usage."
-
-	compactOpts := m.opts
-	compactOpts.Messages = m.conversationHistory
-	compactOpts.MaxTurns = 1
 
 	m.inputReady = false
 	m.currentInput = "/compact"
@@ -632,26 +658,40 @@ func (m Model) startCompact() Model {
 
 	ctx, cancel := context.WithCancel(m.ctx)
 	m.cancel = cancel
-	ch := agent.RunAgent(ctx, summaryRequest, compactOpts)
 
-	// Wrap the channel: on EventMessage replace history with summary
-	wrapped := make(chan agent.AgentEvent, 100)
+	// Run compaction in a goroutine and stream a synthetic event sequence
+	wrapped := make(chan agent.AgentEvent, 10)
+	history := m.conversationHistory
+	client := m.opts.Client
+	cwd := m.opts.CWD
+
 	go func() {
 		defer close(wrapped)
-		for ev := range ch {
-			if ev.Type == agent.EventMessage && ev.Message != nil {
-				var sb strings.Builder
-				for _, block := range ev.Message.Content {
-					if block.Type == "text" {
-						sb.WriteString(block.Text)
-					}
+		compacted, summaryText, err := memory.CompactMessages(ctx, client, history)
+		if err != nil {
+			wrapped <- agent.AgentEvent{Type: agent.EventError, Error: err}
+			return
+		}
+		// Emit compact event so the UI can show feedback
+		wrapped <- agent.AgentEvent{Type: agent.EventCompact}
+		// Emit a synthetic message event carrying the compacted history
+		wrapped <- agent.AgentEvent{
+			Type:     agent.EventMessage,
+			Messages: compacted,
+			Message: &api.Message{
+				Content: []api.ContentBlock{{Type: "text", Text: summaryText}},
+			},
+		}
+
+		// Opportunistically save memories after compaction (Phase 5b)
+		if cwd != "" && client != nil {
+			go func() {
+				memCtx, memCancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer memCancel()
+				if bullets, merr := memory.ExtractMemories(memCtx, client, summaryText); merr == nil && bullets != "" {
+					memory.AppendMemory(cwd, bullets) //nolint:errcheck
 				}
-				ev.Messages = []api.APIMessage{
-					api.NewUserTextMessage("[Conversation compacted]\n\n" + summaryRequest),
-					api.NewAssistantTextMessage(sb.String()),
-				}
-			}
-			wrapped <- ev
+			}()
 		}
 	}()
 

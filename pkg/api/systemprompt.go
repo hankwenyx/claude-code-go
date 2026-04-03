@@ -40,7 +40,7 @@ func BuildSystemPrompt(opts BuildOptions) []SystemBlock {
 func buildStaticBlock(enabledTools []string) string {
 	var sb strings.Builder
 
-	sb.WriteString(`You are Claude Code Go, an interactive CLI agent for software engineering tasks — a Go implementation of Claude Code.
+	sb.WriteString(`You are gocc, an interactive CLI agent for software engineering tasks.
 
 # Core Principles
 - Assist with authorized security testing, CTF challenges, and educational security contexts

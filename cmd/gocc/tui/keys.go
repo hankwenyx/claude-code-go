@@ -14,6 +14,7 @@ type keyMap struct {
 	ScrollDown  key.Binding
 	HistoryPrev key.Binding
 	HistoryNext key.Binding
+	CancelQueue key.Binding
 }
 
 var keys = keyMap{
@@ -56,5 +57,9 @@ var keys = keyMap{
 	HistoryNext: key.NewBinding(
 		key.WithKeys("ctrl+n", "down"),
 		key.WithHelp("ctrl+n/↓", "next input"),
+	),
+	CancelQueue: key.NewBinding(
+		key.WithKeys("esc"),
+		key.WithHelp("esc", "cancel last queued message"),
 	),
 }

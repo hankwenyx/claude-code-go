@@ -6,6 +6,7 @@ bin/
 *.so
 *.dylib
 main
+gocc
 
 # Build output
 /claude

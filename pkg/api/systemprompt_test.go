@@ -19,7 +19,7 @@ func TestBuildSystemPrompt(t *testing.T) {
 			},
 			wantBlocks: 2,
 			wantContains: []string{
-				"Claude Code Go",
+				"gocc",
 				"Current working directory: /test/path",
 			},
 		},
@@ -54,7 +54,7 @@ func TestBuildSystemPrompt(t *testing.T) {
 			},
 			wantBlocks: 2,
 			wantContains: []string{
-				"Claude Code Go",
+				"gocc",
 				"Available tools: Bash, Glob",
 				"Current working directory: /test/path",
 				"# Project Rules",
@@ -102,7 +102,7 @@ func TestBuildStaticBlock(t *testing.T) {
 			name:         "no tools",
 			enabledTools: nil,
 			wantContains: []string{
-				"Claude Code Go",
+				"gocc",
 				"Core Principles",
 				"Tool Usage",
 			},

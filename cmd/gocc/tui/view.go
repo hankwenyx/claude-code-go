@@ -39,7 +39,19 @@ func (m Model) View() string {
 	} else if m.retryStatus != "" {
 		leftStatus = retryStyle.Render(m.retryStatus)
 	} else if m.eventChan != nil {
-		leftStatus = statusStyle.Render("Running…  (Ctrl+C to quit)")
+		if len(m.pendingInputs) > 0 {
+			preview := m.pendingInputs[len(m.pendingInputs)-1]
+			if len(preview) > 35 {
+				preview = preview[:35] + "…"
+			}
+			suffix := ""
+			if len(m.pendingInputs) > 1 {
+				suffix = fmt.Sprintf(" (+%d)", len(m.pendingInputs)-1)
+			}
+			leftStatus = statusStyle.Render("Running…  ·  ⏎ 已排队: " + preview + suffix + "  Esc撤回")
+		} else {
+			leftStatus = statusStyle.Render("Running…  (可输入下一条消息，Enter 排队)")
+		}
 	} else if m.inputReady {
 		leftStatus = statusStyle.Render("Enter to send · /help · /clear · /model · /compact")
 	}
